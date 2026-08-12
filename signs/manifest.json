@@ -1,0 +1,34 @@
+{
+  "signatures": [
+    {
+      "id": "source-signature-1",
+      "label": "Source signature 1",
+      "file": "source-signature-1.png",
+      "extension": "png"
+    },
+    {
+      "id": "source-signature-2",
+      "label": "Source signature 2",
+      "file": "source-signature-2.png",
+      "extension": "png"
+    },
+    {
+      "id": "saiful-alam-rasel-signature",
+      "label": "Saiful Alam Rasel PDF signature",
+      "file": "saiful-alam-rasel-signature.png",
+      "extension": "png"
+    },
+    {
+      "id": "salah-uddin-misbah-signature",
+      "label": "Salah Uddin Misbah signature",
+      "file": "salah-uddin-misbah-signature.png",
+      "extension": "png"
+    },
+    {
+      "id": "tamal-paul-signature",
+      "label": "Tamal Paul signature",
+      "file": "tamal-paul-signature.png",
+      "extension": "png"
+    }
+  ]
+}
