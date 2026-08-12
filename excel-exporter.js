@@ -36,8 +36,58 @@ function border(style = "thin", color = COLORS.line) {
   };
 }
 
+// Loading the source workbook as a template keeps every merge definition that
+// already existed in the file. spliceRows() clears cell VALUES but never clears
+// those merges, so re-merging the same ranges throws "Cannot merge already
+// merged cells". These two helpers make the rebuild idempotent.
+function clearMerges(worksheet) {
+  if (!worksheet) return;
+  const merges = worksheet._merges || {};
+  for (const key of Object.keys(merges)) {
+    try {
+      worksheet.unMergeCells(key);
+    } catch (error) {
+      // Range was already released - nothing to undo.
+    }
+  }
+}
+
+function resetSheet(worksheet) {
+  if (!worksheet) return;
+  // spliceRows() does not reliably drop every cached cell. Any cell left holding
+  // a shared-formula master or clone will break workbook.xlsx.writeBuffer() with
+  // "Shared Formula master must exist above and or left of clone" as soon as we
+  // overwrite a master with a plain value. These sheets are rebuilt from scratch,
+  // so clear their contents outright before rebuilding.
+  worksheet.eachRow({ includeEmpty: true }, (row) => {
+    row.eachCell({ includeEmpty: true }, (cell) => {
+      try {
+        cell.value = null;
+      } catch (error) {
+        // Cell cannot be cleared - leave it and continue.
+      }
+    });
+  });
+  if (worksheet.rowCount > 0) worksheet.spliceRows(1, worksheet.rowCount);
+  clearMerges(worksheet);
+}
+
+function safeMerge(worksheet, ...args) {
+  try {
+    worksheet.mergeCells(...args);
+  } catch (error) {
+    // Unmerge whatever occupies the target range, then merge once more.
+    try {
+      worksheet.unMergeCells(...args);
+      worksheet.mergeCells(...args);
+    } catch (retryError) {
+      // Leave the cells unmerged rather than aborting the whole export.
+    }
+  }
+}
+
 function applyTitle(worksheet, range, title) {
-  worksheet.mergeCells(range);
+  safeMerge(worksheet, range);
   const cell = worksheet.getCell(range.split(":")[0]);
   cell.value = title;
   cell.font = { name: "Aptos Display", size: 15, bold: true, color: rgb(COLORS.black) };
@@ -147,7 +197,7 @@ async function addSourceSignature(workbook, worksheet, assets, endRow, widths, l
   const sourceAsset = getSignatureAsset(assets, "source-signature-1");
   const signatureRow = endRow + 2;
   const endColumn = Math.min(3, widths.length);
-  worksheet.mergeCells(signatureRow, 1, signatureRow, endColumn);
+  safeMerge(worksheet, signatureRow, 1, signatureRow, endColumn);
   const lineCell = worksheet.getCell(signatureRow, 1);
   lineCell.value = "";
   lineCell.fill = { type: "pattern", pattern: "solid", fgColor: rgb(COLORS.white) };
@@ -155,7 +205,7 @@ async function addSourceSignature(workbook, worksheet, assets, endRow, widths, l
   worksheet.getRow(signatureRow).height = 31;
   await placeCenteredSignature(workbook, worksheet, sourceAsset, 1, endColumn, signatureRow, widths);
 
-  worksheet.mergeCells(signatureRow + 1, 1, signatureRow + 1, endColumn);
+  safeMerge(worksheet, signatureRow + 1, 1, signatureRow + 1, endColumn);
   const caption = worksheet.getCell(signatureRow + 1, 1);
   caption.value = label;
   caption.font = { name: "Aptos", size: 9, color: rgb(COLORS.black) };
@@ -204,7 +254,7 @@ function addPositiveNegativeRules(sheet, reference) {
 async function addScoreSheet(workbook, data, model, assets) {
   let sheet = workbook.getWorksheet("Sales forecasting tools");
   if (!sheet) sheet = workbook.addWorksheet("Sales forecasting tools", { properties: { defaultRowHeight: 20 } });
-  else sheet.spliceRows(1, sheet.rowCount);
+  else resetSheet(sheet);
   sheet.views = [{ showGridLines: false, state: "frozen", ySplit: 2 }];
   sheet.pageSetup = { orientation: "landscape", paperSize: 9, fitToPage: true, fitToWidth: 1, fitToHeight: 1, margins: { left: 0.25, right: 0.25, top: 0.3, bottom: 0.3, header: 0.1, footer: 0.1 } };
   const scoreWidths = [6, 38, 14, 11, 31, 18, 14, 15, 15];
@@ -242,7 +292,7 @@ async function addScoreSheet(workbook, data, model, assets) {
   scoreRow.eachCell((cell, column) => styleCell(cell, column === 3 || column === 8 ? "percent" : "text", COLORS.green, true));
 
   const detailStart = answers.length + 7;
-  sheet.mergeCells(`A${detailStart}:C${detailStart}`);
+  safeMerge(sheet, `A${detailStart}:C${detailStart}`);
   sheet.getCell(`A${detailStart}`).value = "PROJECT & REFERENCE INFORMATION";
   styleSectionTitle(sheet.getCell(`A${detailStart}`));
   const detailRows = [
@@ -265,7 +315,7 @@ async function addScoreSheet(workbook, data, model, assets) {
   ];
   detailRows.forEach(([label, value, type], index) => {
     const rowNo = detailStart + 1 + index;
-    sheet.mergeCells(`A${rowNo}:B${rowNo}`);
+    safeMerge(sheet, `A${rowNo}:B${rowNo}`);
     sheet.getCell(`A${rowNo}`).value = label;
     sheet.getCell(`C${rowNo}`).value = value;
     styleCell(sheet.getCell(`A${rowNo}`), "text", index > 11 ? COLORS.peach : null, index > 11);
@@ -273,7 +323,7 @@ async function addScoreSheet(workbook, data, model, assets) {
   });
 
   const categoryStart = detailStart;
-  sheet.mergeCells(`E${categoryStart}:I${categoryStart}`);
+  safeMerge(sheet, `E${categoryStart}:I${categoryStart}`);
   sheet.getCell(`E${categoryStart}`).value = "CATEGORY WISE SALES MIX";
   styleSectionTitle(sheet.getCell(`E${categoryStart}`));
   const categoryHeader = sheet.getRow(categoryStart + 1);
@@ -301,18 +351,18 @@ async function addScoreSheet(workbook, data, model, assets) {
 async function addInformationSheet(workbook, data, model, assets) {
   let sheet = workbook.getWorksheet("INFORMATION");
   if (!sheet) sheet = workbook.addWorksheet("INFORMATION", { properties: { defaultRowHeight: 20 } });
-  else sheet.spliceRows(1, sheet.rowCount);
+  else resetSheet(sheet);
   sheet.views = [{ showGridLines: false }];
   sheet.pageSetup = { orientation: "landscape", paperSize: 9, fitToPage: true, fitToWidth: 1, fitToHeight: 1, margins: { left: 0.25, right: 0.25, top: 0.3, bottom: 0.3, header: 0.1, footer: 0.1 } };
   setColWidths(sheet, [32, 26, 3, 24, 10, 13, 15, 3, 3, 3, 3]);
   applyTitle(sheet, "A2:G2", "BUSINESS FEASIBILITY INFORMATION");
   sheet.getRow(2).height = 27;
-  sheet.mergeCells("A4:B4");
+  safeMerge(sheet, "A4:B4");
   sheet.getCell("A4").value = "PROJECT NAME";
   styleSectionTitle(sheet.getCell("A4"));
   // Keep the project name block separate from the manpower heading; overlapping
   // merged ranges cause ExcelJS to reject the export.
-  sheet.mergeCells("C4:D4");
+  safeMerge(sheet, "C4:D4");
   sheet.getCell("C4").value = data.project.locationArea;
   sheet.getCell("C4").font = { name: "Aptos", size: 11, bold: true, color: rgb(COLORS.black) };
   sheet.getCell("C4").fill = { type: "pattern", pattern: "solid", fgColor: rgb(COLORS.white) };
@@ -339,13 +389,13 @@ async function addInformationSheet(workbook, data, model, assets) {
   basicRows.forEach(([label, value, type], index) => {
     const row = 6 + index;
     sheet.getCell(`A${row}`).value = label;
-    sheet.mergeCells(`B${row}:C${row}`);
+    safeMerge(sheet, `B${row}:C${row}`);
     sheet.getCell(`B${row}`).value = value;
     styleCell(sheet.getCell(`A${row}`), "text", index >= 9 ? COLORS.yellow : null, false);
     styleCell(sheet.getCell(`B${row}`), type, index >= 9 ? COLORS.yellow : null, false);
     sheet.getCell(`C${row}`).border = border();
   });
-  sheet.mergeCells("E4:G4");
+  safeMerge(sheet, "E4:G4");
   sheet.getCell("E4").value = "MANPOWER ALLOCATION";
   styleSectionTitle(sheet.getCell("E4"));
   const manpowerHeader = sheet.getRow(6);
@@ -375,18 +425,18 @@ async function addInformationSheet(workbook, data, model, assets) {
 async function addFeasibilitySheet(workbook, data, model, assets) {
   let sheet = workbook.getWorksheet("AUTO GENERATED FEASIBILITY");
   if (!sheet) sheet = workbook.addWorksheet("AUTO GENERATED FEASIBILITY", { properties: { defaultRowHeight: 18 } });
-  else sheet.spliceRows(1, sheet.rowCount);
+  else resetSheet(sheet);
   sheet.views = [{ showGridLines: false, state: "frozen", ySplit: 2, xSplit: 2 }];
   sheet.pageSetup = { orientation: "portrait", paperSize: 8, fitToPage: true, fitToWidth: 1, fitToHeight: 1, margins: { left: 0.2, right: 0.2, top: 0.3, bottom: 0.3, header: 0.1, footer: 0.1 } };
   const feasibilityWidths = [39, 14, 14, 14, 14, 3, 14, 14, 14, 14, 14, 16];
   setColWidths(sheet, feasibilityWidths);
-  sheet.mergeCells("A1:B1");
+  safeMerge(sheet, "A1:B1");
   sheet.getCell("A1").value = data.project.locationArea;
   sheet.getCell("A1").font = { name: "Aptos", size: 11, bold: true, color: rgb(COLORS.black) };
   sheet.getCell("A1").fill = { type: "pattern", pattern: "solid", fgColor: rgb(COLORS.white) };
   sheet.getCell("A1").alignment = { horizontal: "center", vertical: "middle", wrapText: true };
   sheet.getCell("A1").border = border("medium");
-  sheet.mergeCells("C1:D1");
+  safeMerge(sheet, "C1:D1");
   sheet.getCell("C1").value = "Prepare Date";
   sheet.getCell("C1").font = { name: "Aptos", bold: true, color: rgb(COLORS.black) };
   sheet.getCell("C1").fill = { type: "pattern", pattern: "solid", fgColor: rgb(COLORS.white) };
@@ -430,7 +480,7 @@ async function addFeasibilitySheet(workbook, data, model, assets) {
       addPositiveNegativeRules(sheet, `G${rowIndex}:L${rowIndex}`);
     }
     if (item.type === "heading") {
-      sheet.mergeCells(`A${rowIndex}:L${rowIndex}`);
+      safeMerge(sheet, `A${rowIndex}:L${rowIndex}`);
       row.getCell(1).alignment = { horizontal: "left", vertical: "middle" };
       row.height = 20;
     }
@@ -443,7 +493,7 @@ async function addFeasibilitySheet(workbook, data, model, assets) {
   });
 
   rowIndex += 1;
-  sheet.mergeCells(`A${rowIndex}:B${rowIndex}`);
+  safeMerge(sheet, `A${rowIndex}:B${rowIndex}`);
   sheet.getCell(`A${rowIndex}`).value = "Cash-flow & Return Summary";
   styleSectionTitle(sheet.getCell(`A${rowIndex}`));
   ["YR-1", "YR-2", "YR-3", "YR-4", "YR-5"].forEach((value, index) => { sheet.getCell(rowIndex, 7 + index).value = value; });
@@ -475,7 +525,7 @@ async function addFeasibilitySheet(workbook, data, model, assets) {
   metrics.forEach(([label, value, type], index) => {
     const row = sheet.getRow(rowIndex + index);
     row.getCell(1).value = label;
-    sheet.mergeCells(`B${rowIndex + index}:C${rowIndex + index}`);
+    safeMerge(sheet, `B${rowIndex + index}:C${rowIndex + index}`);
     row.getCell(2).value = value;
     styleCell(row.getCell(1), "text", null, index >= 1);
     styleCell(row.getCell(2), type, null, index >= 1);
@@ -499,15 +549,15 @@ async function addFeasibilitySheet(workbook, data, model, assets) {
       lineCell.fill = { type: "pattern", pattern: "solid", fgColor: rgb(COLORS.white) };
     });
     sheet.getRow(blockRow).height = 30;
-    sheet.mergeCells(blockRow + 1, col, blockRow + 1, col + 1);
+    safeMerge(sheet, blockRow + 1, col, blockRow + 1, col + 1);
     sheet.getCell(blockRow + 1, col).value = person.role;
     sheet.getCell(blockRow + 1, col).alignment = { horizontal: "center", vertical: "middle" };
     sheet.getCell(blockRow + 1, col).font = { name: "Aptos", size: 9 };
-    sheet.mergeCells(blockRow + 2, col, blockRow + 2, col + 1);
+    safeMerge(sheet, blockRow + 2, col, blockRow + 2, col + 1);
     sheet.getCell(blockRow + 2, col).value = person.name;
     sheet.getCell(blockRow + 2, col).alignment = { horizontal: "center", vertical: "middle", wrapText: true };
     sheet.getCell(blockRow + 2, col).font = { name: "Aptos", size: 9, bold: true };
-    sheet.mergeCells(blockRow + 3, col, blockRow + 3, col + 1);
+    safeMerge(sheet, blockRow + 3, col, blockRow + 3, col + 1);
     sheet.getCell(blockRow + 3, col).value = person.designation;
     sheet.getCell(blockRow + 3, col).alignment = { horizontal: "center", vertical: "middle", wrapText: true };
     sheet.getCell(blockRow + 3, col).font = { name: "Aptos", size: 8 };

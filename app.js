@@ -751,7 +751,13 @@ async function downloadRulesExport() {
     if (error?.name === "AbortError") {
       state.status = { kind: "ready", message: "Excel with rules save was cancelled." };
     } else {
-      state.status = { kind: "error", message: `Rules Excel export failed: ${error.message}` };
+      state.status = {
+        kind: "error",
+        message: String(error?.message || error).startsWith("Rules Excel export failed")
+          ? String(error.message)
+          : `Rules Excel export failed: ${error.message}`,
+      };
+
     }
   }
   render();
