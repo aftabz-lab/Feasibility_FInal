@@ -195,12 +195,6 @@ function renderOverview() {
         <h2>${escapeHtml(data.project.locationArea)}</h2>
         <p class="page-subtitle">A complete feasibility view from the same three-sheet Excel structure.</p>
       </div>
-      <div class="export-card">
-        <span>Print-ready output</span>
-        <strong>3 sheets + 3-page PDF</strong>
-        <div class="export-actions"><button class="btn btn-primary btn-small" type="button" data-action="download-rules-xlsx" title="Save the formula-based Excel with all source rules">Download Excel with Rules</button><button class="btn btn-pdf btn-small" type="button" data-action="download-pdf">Download PDF</button></div>
-        <small class="export-helper">Formula workbook · choose PC folder &amp; filename</small>
-      </div>
     </div>
     <div class="metric-grid">
       ${metricCard("Projected Daily Sales", `৳ ${formatMoney(model.inputs.dailySales)}`, "Input / manual sales forecast", "blue")}
