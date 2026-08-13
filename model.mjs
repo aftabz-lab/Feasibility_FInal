@@ -359,6 +359,7 @@ export const defaultData = {
   reference: {
     gpLookup: {},
     basketLookup: {},
+    writeOffLookup: {},
     autoGpPercent: 0.15969475504252637,
     autoGpShareFr: 0.4,
     referenceSalesPerDay: 133627.54758420604,
@@ -656,6 +657,9 @@ export function calculateModel(data) {
   const key = getGpKey(data);
   const autoGpPercent = optionalNumber(data.reference.gpLookup?.[key]) ?? number(data.reference.autoGpPercent, 0.16);
   const autoBasketSize = optionalNumber(data.reference.basketLookup?.[key]) ?? number(data.reference.autoBasketSize, 426.76);
+  const autoStockWriteOffRate = optionalNumber(data.reference.writeOffLookup?.[key])
+    ?? number(data.advanced.stockWriteOffRate, 0.0048);
+  const stockWriteOffRateValue = optionalNumber(data.advanced.stockWriteOffRateOverride) ?? autoStockWriteOffRate;
   const gpPercentOverride = optionalPercentageOverride(project.gpPercentOverride);
   const gpShareOverride = optionalPercentageOverride(project.gpShareOverride);
   const gpPercent = gpPercentOverride ?? autoGpPercent;
@@ -748,7 +752,7 @@ export function calculateModel(data) {
   const conveyance = annualMonthly(advanced.conveyanceMonthly, [0, 0, 0, 0]);
   const printing = annualMonthly(advanced.printingMonthly, [0, 0, 0, 0]);
   const entertainment = annualMonthly(advanced.entertainmentMonthly, [0, 0, 0, 0]);
-  const stockWriteOff = multiply(sales, Array(8).fill(number(advanced.stockWriteOffRate)));
+  const stockWriteOff = multiply(sales, Array(8).fill(stockWriteOffRateValue));
   // The source workbook totals outlet OPEX as SUM(C18:C42), and row 18 IS the
   // franchisee commission. Leaving it out here while still crediting it as
   // franchisee income counts it once as income and never as a cost, inflating
@@ -887,7 +891,7 @@ export function calculateModel(data) {
     line("Conveyance Expenses", conveyance),
     line("Printing and Stationary", printing),
     line("Entertainment", entertainment),
-    line("Stock write off (Provision)", stockWriteOff, { rate: advanced.stockWriteOffRate }),
+    line("Stock write off (Provision)", stockWriteOff, { rate: stockWriteOffRateValue }),
     line("Total Outlet Level OPEX", outletOpex, { emphasis: true, separatorBefore: true }),
     line("Outlet level Gain/Loss Before OFC", outletGainLossBeforeOFC, { emphasis: true }),
     line("Operating Financing Cost", operatingFinanceCost, { rate: advanced.outletFinanceRate }),
@@ -1030,17 +1034,24 @@ function pickNumber(value, fallback) {
 function extractLookup(workbook) {
   const gpLookup = {};
   const basketLookup = {};
+  const writeOffLookup = {};
   const sheetName = "Sales forecasting tools";
   for (let row = 3; row <= 500; row += 1) {
     const key = getCell(workbook, sheetName, `AB${row}`);
     const gp = optionalNumber(getCell(workbook, sheetName, `AC${row}`));
     const basket = optionalNumber(getCell(workbook, sheetName, `AD${row}`));
+    // Column AE is the stock write-off provision rate. The workbook reads it with
+    // VLOOKUP on the same "<Division> <FR/OWN> <PNP>" key as GP% and basket size,
+    // so it has to move with Division too - importing the cached number instead
+    // froze every site at the source workbook's region.
+    const writeOff = optionalNumber(getCell(workbook, sheetName, `AE${row}`));
     if (typeof key === "string" && key.trim()) {
       if (gp !== null) gpLookup[key.trim()] = gp;
       if (basket !== null) basketLookup[key.trim()] = basket;
+      if (writeOff !== null) writeOffLookup[key.trim()] = writeOff;
     }
   }
-  return { gpLookup, basketLookup };
+  return { gpLookup, basketLookup, writeOffLookup };
 }
 
 // Averages Electricity!F by the sheet's own "Unique" key (size band + P&P flag),
@@ -1114,10 +1125,8 @@ export function extractFromWorkbook(workbook, sourceName = "Imported workbook") 
   // would freeze decoration cost at the imported workbook's SFT/P&P. Only keep it
   // as a manual override when the sheet genuinely disagrees with the rule.
   // Stock write-off rate lives in the feasibility sheet, not in the app's defaults.
-  data.advanced.stockWriteOffRate = pickNumber(
-    getCell(workbook, "AUTO GENERATED FEASIBILITY", "B42"),
-    data.advanced.stockWriteOffRate,
-  );
+  // B42 is itself a VLOOKUP result; the lookup table below drives it instead so it
+  // follows Division/ownership/P&P changes made in the app.
   // Rebuild the electricity averages from the workbook's own Electricity sheet so
   // an updated sheet always beats the built-in fallback table.
   data.advanced.electricityTable = readElectricityTable(workbook);
@@ -1144,6 +1153,7 @@ export function extractFromWorkbook(workbook, sourceName = "Imported workbook") 
   const lookup = extractLookup(workbook);
   data.reference.gpLookup = lookup.gpLookup;
   data.reference.basketLookup = lookup.basketLookup;
+  data.reference.writeOffLookup = lookup.writeOffLookup;
 
   const staffAddress = [
     ["om", 7], ["icmo", 8], ["duty", 9], ["cg", 12], ["commodity", 13], ["protein", 14], ["perishables", 15],

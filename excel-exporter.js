@@ -23,6 +23,297 @@ const MONEY_FORMAT = '#,##0;[Red](#,##0);-';
 const NUMBER_FORMAT = '#,##0.0;[Red](#,##0.0);-';
 const INTEGER_FORMAT = '#,##0;[Red](#,##0);-';
 const PERCENT_FORMAT = '0.0%;[Red](0.0%);-';
+// ---------------------------------------------------------------------------
+// Template mode for "Download Excel with Rules".
+//
+// Instead of rebuilding the three visible sheets from computed numbers, this
+// writes ONLY the input cells into the loaded master workbook and asks Excel to
+// recalculate on open. Every formula in the file survives, so each cell in the
+// visible sheets shows its real rule in the formula bar, and the workbook keeps
+// the exact layout of the master template.
+//
+// The map below mirrors what extractFromWorkbook() reads, but points at the true
+// INPUT cells. Most of the "Sales forecasting tools" cells are formulas fed by
+// the Master sheet (C20 = Master!C2, F3 = Master!C5, ...), so writing them there
+// would destroy the link - the value is written to Master instead.
+// ---------------------------------------------------------------------------
+
+// [staff id, INFORMATION row (salary in F), Master row holding the quantity].
+// INFORMATION!E7 is "=Master!C12", E12 is "=Master!C15" and so on - the offset is
+// not uniform, so the mapping is spelled out rather than computed.
+const STAFF_ROWS = [
+  ["om", 7, 12], ["icmo", 8, 13], ["duty", 9, 14], ["cg", 12, 15],
+  ["commodity", 13, 16], ["protein", 14, 17], ["perishables", 15, 18], ["gml", 16, 19],
+  ["pos", 17, 20], ["porter", 18, 21], ["bsm", 19, 22], ["bkstr", 20, 23],
+  ["security", 21, 24], ["cleaner", 22, 25],
+];
+
+const ASSESSMENT_CELLS = [
+  ["locationType", "F6"],
+  ["marketNearby", "F7"],
+  ["avgDepartmentalSales", "F8"],
+  ["roadStatus", "F9"],
+  ["worshipCount", "F10"],
+  ["educationCount", "F11"],
+  ["bankOfficeCount", "F12"],
+  ["competitorAvgSales", "F13"],
+  ["publicTransit", "F14"],
+  ["signboardVisibility", "F16"],
+  ["hotelRestaurantHospitalCount", "F17"],
+];
+
+function writeCell(worksheet, address, value) {
+  if (!worksheet || value === undefined || value === null || value === "") return;
+  if (typeof value === "number" && !Number.isFinite(value)) return;
+  const cell = worksheet.getCell(address);
+  const existing = cell.value;
+  // Never overwrite a formula: that is exactly the "rule" the user wants kept.
+  if (existing && typeof existing === "object" && (existing.formula || existing.sharedFormula)) return;
+  cell.value = value;
+}
+
+
+// The master template already carries its own approval form on
+// "AUTO GENERATED FEASIBILITY": role/name/designation at rows 95-97 (first row of
+// four) and 103-105 (second row of three), with the signing lines drawn between
+// them. These slots mirror that layout - column is 0-indexed, labelRow is 1-based.
+// lineFrom/lineTo are 1-based columns for the signing rule, taken from the
+// straight-connector positions in the master template. ExcelJS cannot preserve
+// those connector shapes through a load/save cycle (a pristine round-trip loses
+// them too), so the line is redrawn as a cell border on the row above the label.
+const TEMPLATE_SIGNATURE_SLOTS = [
+  { column: 0, labelRow: 95, lineFrom: 1, lineTo: 2 },
+  { column: 2, labelRow: 95, lineFrom: 3, lineTo: 5 },
+  { column: 6, labelRow: 95, lineFrom: 7, lineTo: 9 },
+  { column: 9, labelRow: 95, lineFrom: 10, lineTo: 12 },
+  { column: 0, labelRow: 103, lineFrom: 1, lineTo: 2 },
+  { column: 3, labelRow: 103, lineFrom: 4, lineTo: 6 },
+  { column: 9, labelRow: 103, lineFrom: 10, lineTo: 12 },
+];
+
+function clearWorksheetImages(worksheet) {
+  if (!worksheet) return;
+  // Drop the template's own signature images so ticking a box replaces them
+  // instead of stacking a second signature on top.
+  if (Array.isArray(worksheet._media)) worksheet._media.length = 0;
+}
+
+async function applyTemplateSignatures(workbook, model, assets) {
+  const sheet = workbook.getWorksheet("AUTO GENERATED FEASIBILITY");
+  if (!sheet) return;
+  clearWorksheetImages(sheet);
+  clearTemplateSignatureRows(sheet);
+
+  const strip = await renderSignatureStripImage(model, assets);
+  if (!strip?.base64) return;
+
+  const imageId = workbook.addImage({ base64: strip.base64, extension: "png" });
+  // Anchor across the full report width, starting immediately under row 94.
+  sheet.addImage(imageId, {
+    tl: { nativeCol: 0, nativeColOff: 0, nativeRow: 94, nativeRowOff: 0 },
+    br: { nativeCol: 12, nativeColOff: 0, nativeRow: 106, nativeRowOff: 0 },
+    editAs: "oneCell",
+  });
+}
+
+function columnLetter(oneBasedColumn) {
+  let result = "";
+  let value = oneBasedColumn;
+  while (value > 0) {
+    const remainder = (value - 1) % 26;
+    result = String.fromCharCode(65 + remainder) + result;
+    value = Math.floor((value - 1) / 26);
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Signature strip image.
+//
+// The template's approval form spreads signatures across merged cells, and Excel
+// anchors them to cell edges, so ink never lines up with the captions the way it
+// does in the PDF. Instead of fighting that, the whole approval block is drawn
+// once on a canvas - same 4-then-3 layout, same dashed rules, same ordering as
+// drawSignatureBlocks() in pdf-exporter.js - and the resulting PNG is dropped
+// into the sheet as a single picture. One image cannot drift out of alignment.
+// ---------------------------------------------------------------------------
+
+const STRIP_SCALE = 2;              // draw at 2x for a crisp image
+const STRIP_WIDTH = 780;            // points, close to the PDF's usable width
+const STRIP_ROW_HEIGHT = 118;
+const STRIP_TOP_PAD = 10;
+
+function loadImageElement(dataUrl) {
+  return new Promise((resolve) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => resolve(null);
+    image.src = dataUrl;
+  });
+}
+
+async function renderSignatureStripImage(model, assets) {
+  if (typeof document === "undefined" || typeof document.createElement !== "function") return null;
+  if (typeof Image !== "function") return null;
+
+  const groups = signatureRowGroups(model?.signatories || []);
+  if (groups.length === 0) return null;
+
+  const canvas = document.createElement("canvas");
+  const height = STRIP_TOP_PAD * 2 + groups.length * STRIP_ROW_HEIGHT;
+  canvas.width = STRIP_WIDTH * STRIP_SCALE;
+  canvas.height = height * STRIP_SCALE;
+  const context = canvas.getContext("2d");
+  if (!context) return null;
+  context.scale(STRIP_SCALE, STRIP_SCALE);
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, STRIP_WIDTH, height);
+  context.textBaseline = "alphabetic";
+
+  for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
+    const group = groups[groupIndex];
+    const top = STRIP_TOP_PAD + groupIndex * STRIP_ROW_HEIGHT;
+    const blockWidth = STRIP_WIDTH / group.length;
+    const lineWidth = Math.min(190, blockWidth - 24);
+    const lineY = top + 56;
+
+    for (let index = 0; index < group.length; index += 1) {
+      const person = group[index];
+      const blockX = index * blockWidth;
+      const centreX = blockX + blockWidth / 2;
+      const lineX = centreX - lineWidth / 2;
+
+      // dashed signing rule
+      context.save();
+      context.strokeStyle = "#9fb3c8";
+      context.lineWidth = 0.8;
+      if (context.setLineDash) context.setLineDash([3, 2]);
+      context.beginPath();
+      context.moveTo(lineX, lineY);
+      context.lineTo(lineX + lineWidth, lineY);
+      context.stroke();
+      context.restore();
+
+      // ink, only when ticked in the Signature manager
+      if (person.includeInPdf === true) {
+        const asset = getSignatureAsset(assets, person.signatureId);
+        if (asset) {
+          const base64 = await toBase64(asset);
+          if (base64) {
+            if (asset.transparentBase64 === undefined) {
+              asset.transparentBase64 = await withTransparentBackground(base64, asset.extension);
+            }
+            const source = asset.transparentBase64
+              ? `data:image/png;base64,${asset.transparentBase64}`
+              : `data:image/${asset.extension || "png"};base64,${base64}`;
+            const image = await loadImageElement(source);
+            if (image && image.width && image.height) {
+              const maxWidth = Math.min(lineWidth, 170);
+              const maxHeight = 60;
+              const ratio = Math.min(maxWidth / image.width, maxHeight / image.height);
+              const drawWidth = image.width * ratio;
+              const drawHeight = image.height * ratio;
+              // sit the ink on the rule, crossing it slightly
+              context.drawImage(image, centreX - drawWidth / 2, lineY - drawHeight * 0.78, drawWidth, drawHeight);
+            }
+          }
+        }
+      }
+
+      context.fillStyle = "#5b7183";
+      context.font = "9px Helvetica, Arial, sans-serif";
+      context.textAlign = "center";
+      context.fillText(String(person.role || ""), centreX, lineY + 18);
+
+      context.fillStyle = "#12263a";
+      context.font = "bold 10px Helvetica, Arial, sans-serif";
+      context.fillText(String(person.name || ""), centreX, lineY + 32);
+
+      context.fillStyle = "#5b7183";
+      context.font = "8px Helvetica, Arial, sans-serif";
+      context.fillText(String(person.designation || ""), centreX, lineY + 45);
+    }
+  }
+
+  const dataUrl = canvas.toDataURL("image/png");
+  return { base64: dataUrl.split(",")[1] || null, width: STRIP_WIDTH, height };
+}
+
+// Wipe the template's own approval block (rows 94-106) so the strip image is the
+// only signature content on the sheet. The rows are cleared rather than deleted:
+// deleting would shift every row beneath and break formulas that reference them.
+function clearTemplateSignatureRows(worksheet, firstRow = 94, lastRow = 106) {
+  if (!worksheet) return;
+  for (let rowNumber = firstRow; rowNumber <= lastRow; rowNumber += 1) {
+    const row = worksheet.getRow(rowNumber);
+    for (let column = 1; column <= 14; column += 1) {
+      const cell = row.getCell(column);
+      // Formulas are cleared here too. The only ones in this range are the
+      // template's caption links (C96 = Master!C27 and so on) - display text that
+      // the strip image now supplies. Nothing downstream reads these cells.
+      cell.value = null;
+      cell.border = {};
+      cell.fill = { type: "pattern", pattern: "none" };
+    }
+  }
+  clearMerges(worksheet);
+}
+
+function applyInputsToTemplate(workbook, data) {
+  const master = workbook.getWorksheet("Master");
+  const forecast = workbook.getWorksheet("Sales forecasting tools");
+  const information = workbook.getWorksheet("INFORMATION");
+  const project = data.project || {};
+  const forecastInputs = data.forecast || {};
+
+  // --- Master sheet: the real input column ---
+  writeCell(master, "C2", project.locationArea);
+  writeCell(master, "C3", project.pnp);
+  writeCell(master, "C4", project.frOwn);
+  writeCell(master, "C5", Number(project.sft) || 0);
+  writeCell(master, "C6", project.density);
+  writeCell(master, "C7", project.incomeLevel);
+  writeCell(master, "C8", Number(project.longFeet) || 0);
+  writeCell(master, "C9", Number(project.projectedDailySales) || 0);
+  writeCell(master, "C10", Number(project.monthlyRent) || 0);
+  writeCell(master, "C11", Number(project.advance) || 0);
+  writeCell(master, "C26", Number(project.outboundTransport) || 0);
+  writeCell(master, "C27", project.salesGivenBy);
+  writeCell(master, "C28", project.openedBy);
+  writeCell(master, "C30", Number(project.existingOutlets) || 0);
+
+  // --- Sales forecasting tools: Division and the assessment answers ---
+  writeCell(forecast, "C21", project.division);
+  ASSESSMENT_CELLS.forEach(([key, address]) => {
+    const value = key === "locationType" ? project.locationType : forecastInputs[key];
+    if (value === undefined || value === null || value === "") return;
+    writeCell(forecast, address, value);
+  });
+
+  // --- INFORMATION: other income and the manpower table ---
+  writeCell(information, "B13", Number(data.information?.otherIncomeRate) || 0);
+  STAFF_ROWS.forEach(([id, informationRow, masterRow]) => {
+    const item = (data.staff || []).find((staff) => staff.id === id);
+    if (!item) return;
+    // Column E is a formula fed from Master, so the quantity goes to its source.
+    writeCell(master, `C${masterRow}`, Number(item.quantity) || 0);
+    writeCell(information, `F${informationRow}`, Number(item.salary) || 0);
+  });
+
+  // Decoration cost is a formula (MAX(1500000, SFT*1000 ...)). Only stamp a value
+  // when the user deliberately overrode it, otherwise leave the rule in place.
+  const decorationOverride = data.information?.decorationCostOverride;
+  if (decorationOverride !== null && decorationOverride !== undefined && decorationOverride !== "") {
+    const cell = information?.getCell("B19");
+    if (cell) cell.value = Number(decorationOverride);
+  }
+
+  // Force a full recalculation when the file is opened so every formula refreshes
+  // against the new inputs rather than showing the template's cached results.
+  workbook.calcProperties = workbook.calcProperties || {};
+  workbook.calcProperties.fullCalcOnLoad = true;
+}
+
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
 function rgb(hex) {
@@ -313,7 +604,7 @@ function columnPositionForPixels(widths, startColumn, offsetPixels) {
 // every formula keeps resolving, but they are never meant to be browsed. Master
 // is marked veryHidden so it cannot be brought back through Excel's Unhide
 // dialog; the rest stay normally hidden.
-const ALWAYS_VERY_HIDDEN = new Set(["Master", "Stock WRT.O_Final"]);
+const ALWAYS_VERY_HIDDEN = new Set(["Master", "Stock WRT.O_Final", "Stock WRT.O"]);
 
 // ExcelJS can READ more conditional-formatting rule types than it can WRITE.
 // "duplicateValues" is one such type: the reader keeps it, the writer has no
@@ -1134,9 +1425,11 @@ export async function downloadRulesWorkbook(
     await workbook.xlsx.load(baseBuffer);
 
     // Refresh existing report sheets from CURRENT dashboard state.
-    await addScoreSheet(workbook, data, model, assets);
-    await addInformationSheet(workbook, data, model, assets);
-    await addFeasibilitySheet(workbook, data, model, assets);
+    // Template mode: leave every sheet exactly as the master workbook has it and
+    // write only the input cells, so all formulas survive and Excel recalculates
+    // them on open. This is what makes the rules visible in the formula bar.
+    applyInputsToTemplate(workbook, data);
+    await applyTemplateSignatures(workbook, model, assets);
 
     const visibleSheets = new Set([
       "Sales forecasting tools",
