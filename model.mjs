@@ -437,6 +437,7 @@ export const defaultData = {
     iceMonthly: 0,
     denominationRate: 0.0003,
     creditCardRate: 0.003,
+    officeCostEscalation: 0.05,
     conveyanceMonthly: 4000,
     printingMonthly: 2500,
     entertainmentMonthly: 1000,
@@ -791,25 +792,30 @@ export function calculateModel(data) {
 
   const sales = annualMonthly(monthlySales, growth);
   const daySales = series(dailySales, dailySales, dailySales, safeDivide(sales[3], 365), safeDivide(sales[4], 365), safeDivide(sales[5], 365), safeDivide(sales[6], 365), safeDivide(sales[7], 365));
+  // Workbook G8 = G9/G7 then H8 = G8*1.04, so basket compounds off YEAR 1 - not
+  // off the reference basket. Footfall is then sales / basket (H7 = H9/H8).
+  const basketGrowthRate = 1 + number(advanced.basketGrowth);
+  const basketYear1 = safeDivide(daySales[3], dailyFootfall);
+  const basketYear = (step) => basketYear1 * (basketGrowthRate ** step);
   const footfall = series(
     dailyFootfall,
     dailyFootfall,
     dailyFootfall,
     dailyFootfall,
-    safeDivide(daySales[4], basketSize * (1 + number(advanced.basketGrowth))),
-    safeDivide(daySales[5], basketSize * ((1 + number(advanced.basketGrowth)) ** 2)),
-    safeDivide(daySales[6], basketSize * ((1 + number(advanced.basketGrowth)) ** 3)),
-    safeDivide(daySales[7], basketSize * ((1 + number(advanced.basketGrowth)) ** 4)),
+    safeDivide(daySales[4], basketYear(1)),
+    safeDivide(daySales[5], basketYear(2)),
+    safeDivide(daySales[6], basketYear(3)),
+    safeDivide(daySales[7], basketYear(4)),
   );
   const basket = series(
     basketSize,
     basketSize,
     basketSize,
-    safeDivide(daySales[3], footfall[3]),
-    basketSize * (1 + number(advanced.basketGrowth)),
-    basketSize * ((1 + number(advanced.basketGrowth)) ** 2),
-    basketSize * ((1 + number(advanced.basketGrowth)) ** 3),
-    basketSize * ((1 + number(advanced.basketGrowth)) ** 4),
+    basketYear1,
+    basketYear(1),
+    basketYear(2),
+    basketYear(3),
+    basketYear(4),
   );
   const gpRates = series(gpPercent, gpPercent, gpPercent, gpPercent, gpPercent + number(advanced.gpAnnualStep), gpPercent + 2 * number(advanced.gpAnnualStep), gpPercent + 3 * number(advanced.gpAnnualStep), gpPercent + 4 * number(advanced.gpAnnualStep));
   const gpv = multiply(sales, gpRates);
@@ -854,9 +860,11 @@ export function calculateModel(data) {
   const ice = annualMonthly(advanced.iceMonthly, [0, 0, 0, 0]);
   const denomination = multiply(sales, Array(8).fill(number(advanced.denominationRate)));
   const creditCard = multiply(sales, Array(8).fill(number(advanced.creditCardRate)));
-  const conveyance = annualMonthly(advanced.conveyanceMonthly, [0, 0, 0, 0]);
-  const printing = annualMonthly(advanced.printingMonthly, [0, 0, 0, 0]);
-  const entertainment = annualMonthly(advanced.entertainmentMonthly, [0, 0, 0, 0]);
+  // Workbook rows 39-41: H = G*105%, so these three escalate 5% every year.
+  const officeCostEscalation = Array(4).fill(number(advanced.officeCostEscalation));
+  const conveyance = annualMonthly(advanced.conveyanceMonthly, officeCostEscalation);
+  const printing = annualMonthly(advanced.printingMonthly, officeCostEscalation);
+  const entertainment = annualMonthly(advanced.entertainmentMonthly, officeCostEscalation);
   const stockWriteOff = multiply(sales, Array(8).fill(stockWriteOffRateValue));
   // The source workbook totals outlet OPEX as SUM(C18:C42), and row 18 IS the
   // franchisee commission. Leaving it out here while still crediting it as
