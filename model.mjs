@@ -192,6 +192,47 @@ function categoryMix(items) {
   return items.map(([name, value]) => ({ name, mix: number(value) / total }));
 }
 
+// Electricity & Utility is looked up from the source workbook's Electricity sheet:
+//   =ROUND(AVERAGEIFS(Electricity!F:F, Electricity!E:E, <size band> & <P&P flag>), 0)
+// These are the averages of that sheet, per size band, for non-P&P (N) and P&P (Y)
+// sites. They are the fallback; extractFromWorkbook() recomputes them live from an
+// imported workbook so an updated Electricity sheet always wins.
+const ELECTRICITY_BANDS = [
+  { max: 800, N: 18774, Y: 18774 },
+  { max: 1000, N: 23712, Y: 23712 },
+  { max: 1200, N: 26357, Y: 26357 },
+  { max: 1500, N: 25955, Y: 49611 },
+  { max: 1800, N: 27788, Y: 78564 },
+  { max: 2000, N: 29176, Y: 75948 },
+  { max: 2500, N: 38158, Y: 70008 },
+  { max: 3000, N: 49988, Y: 84756 },
+  { max: 5000, N: 48264, Y: 192027 },
+  { max: Infinity, N: 52839, Y: 217744 },
+];
+
+export function electricityBandLabel(sft) {
+  const value = Number(sft) || 0;
+  if (value <= 800) return "0 TO 800";
+  if (value <= 1000) return "801 TO 1000";
+  if (value <= 1200) return "1001 TO 1200";
+  if (value <= 1500) return "1201 TO 1500";
+  if (value <= 1800) return "1501 TO 1800";
+  if (value <= 2000) return "1801 TO 2000";
+  if (value <= 2500) return "2001 TO 2500";
+  if (value <= 3000) return "2501 TO 3000";
+  if (value <= 5000) return "3001 TO 5000";
+  return "5001 TO 8000";
+}
+
+export function lookupElectricityMonthly(sft, pnp, table) {
+  const key = `${electricityBandLabel(sft)}${yes(pnp) ? "Y" : "N"}`;
+  const live = table && table[key];
+  if (Number.isFinite(live) && live > 0) return Math.round(live);
+  const value = Number(sft) || 0;
+  const band = ELECTRICITY_BANDS.find((entry) => value <= entry.max) || ELECTRICITY_BANDS[ELECTRICITY_BANDS.length - 1];
+  return Math.round(yes(pnp) ? band.Y : band.N);
+}
+
 const DECORATION_COST_FLOOR = 1500000;
 const DECORATION_COST_PER_SFT = 1000;
 const DECORATION_COST_PNP_ADDITION = 2000000;
@@ -265,6 +306,7 @@ export const defaultData = {
   ],
   advanced: {
     stockPerSft: 1650,
+    stockFreeHoldingDays: 55,
     gpAnnualStep: 0.002,
     salesGrowthYear2: 0.12,
     salesGrowthYear3: 0.1,
@@ -298,7 +340,8 @@ export const defaultData = {
     outletDepreciablePortion: 0.7,
     outletDepreciationMonths: 60,
     transportEscalation: 0.05,
-    franchiseElectricityMonthly: 26357,
+    franchiseElectricityMonthlyOverride: null,
+    electricityTable: null,
     franchiseElectricityEscalation: 0.03,
     rentVatRate: 0.15,
     franchiseMaintenanceMonthly: 2000,
@@ -630,6 +673,8 @@ export function calculateModel(data) {
     number(project.sft) * DECORATION_COST_PER_SFT + (yes(project.pnp) ? DECORATION_COST_PNP_ADDITION : 0),
   );
   const decorationCostValue = optionalNumber(info.decorationCostOverride) ?? autoDecorationCost;
+  const autoElectricityMonthly = lookupElectricityMonthly(project.sft, project.pnp, advanced.electricityTable);
+  const electricityMonthlyValue = optionalNumber(advanced.franchiseElectricityMonthlyOverride) ?? autoElectricityMonthly;
   const decorationCostIsAuto = optionalNumber(info.decorationCostOverride) === null
     || optionalNumber(info.decorationCostOverride) === undefined;
   const isFranchise = String(project.frOwn).toUpperCase() === "FR";
@@ -704,13 +749,42 @@ export function calculateModel(data) {
   const printing = annualMonthly(advanced.printingMonthly, [0, 0, 0, 0]);
   const entertainment = annualMonthly(advanced.entertainmentMonthly, [0, 0, 0, 0]);
   const stockWriteOff = multiply(sales, Array(8).fill(number(advanced.stockWriteOffRate)));
+  // The source workbook totals outlet OPEX as SUM(C18:C42), and row 18 IS the
+  // franchisee commission. Leaving it out here while still crediting it as
+  // franchisee income counts it once as income and never as a cost, inflating
+  // Total Profit by the whole commission.
   const outletOpex = add(
+    franchiseCommission,
     staffContractual, staffPermanent, staffSupport, outletDepreciation, consumption, utility, productWastage, maintenance, security,
     generator, cleaning, outletOperationalExpense, cityCharge, membershipDiscount, insurance, promotion, ice, denomination,
     creditCard, conveyance, printing, entertainment, stockWriteOff,
   );
   const outletGainLossBeforeOFC = subtract(totalIncome, outletOpex);
-  const operatingFinanceCost = annualMonthly(safeDivide(cepValue * number(advanced.outletDepreciablePortion) * number(advanced.outletFinanceRate), 12), [0, 0, 0, 0]);
+  // Workbook C48 / H48. The pre-opening months and YR-1 are charged on a monthly
+  // basis (30-day stock holding, /12 rate); YR-2 onward are charged annually on a
+  // 365-day holding basis:
+  //   monthly: ($C$3*70%)*14%/12 + IF(C5>55, (C5-55)*C9*(1-C14)*14%/12, 0)
+  //   yearly : ($C$3*70%)*14%    + IF(H5>55, (H5-55)*H9*(1-H14)*14%,    0)
+  // Only the CEP term was implemented before, so stock held past the free period
+  // was never charged.
+  const averageStockLevel = number(project.sft) * number(advanced.stockPerSft);
+  const outletFinanceRate = number(advanced.outletFinanceRate);
+  const freeHoldingDays = number(advanced.stockFreeHoldingDays);
+  const cepFinanceAnnual = cepValue * number(advanced.outletDepreciablePortion) * outletFinanceRate;
+  const monthlyHoldingDays = safeDivide(averageStockLevel * 30, monthlySales * (1 - gpRates[0]));
+  const monthlyExcessDays = Math.max(0, monthlyHoldingDays - freeHoldingDays);
+  const monthlyFinanceCost = cepFinanceAnnual / 12
+    + (monthlyExcessDays * dailySales * (1 - gpRates[0]) * outletFinanceRate) / 12;
+  const yearlyFinanceCost = (index) => {
+    const holdingDays = safeDivide(averageStockLevel * 365, sales[index] * (1 - gpRates[index]));
+    const excessDays = Math.max(0, holdingDays - freeHoldingDays);
+    return cepFinanceAnnual + excessDays * safeDivide(sales[index], 365) * (1 - gpRates[index]) * outletFinanceRate;
+  };
+  const operatingFinanceCost = series(
+    monthlyFinanceCost, monthlyFinanceCost, monthlyFinanceCost,
+    monthlyFinanceCost * 12,
+    yearlyFinanceCost(4), yearlyFinanceCost(5), yearlyFinanceCost(6), yearlyFinanceCost(7),
+  );
   const outletPLAfterOFC = subtract(outletGainLossBeforeOFC, operatingFinanceCost);
   const transport = annualMonthly(project.outboundTransport, Array(4).fill(number(advanced.transportEscalation)));
   const outletPLAfterTransport = subtract(outletPLAfterOFC, transport);
@@ -729,7 +803,7 @@ export function calculateModel(data) {
   const franchiseFinancingMonthly = isFranchise ? safeDivide((decorationCostValue + number(project.advance) + number(advanced.securityDeposit)) * number(advanced.franchiseFinanceRate), 12) : 0;
   const franchiseFinancing = annualMonthly(franchiseFinancingMonthly, [0, 0, 0, 0]);
   const franchiseUtility = annualMonthly(
-    isFranchise ? advanced.franchiseElectricityMonthly : 0,
+    isFranchise ? electricityMonthlyValue : 0,
     Array(4).fill(number(advanced.franchiseElectricityEscalation)),
   );
   const franchiseMaintenance = annualMonthly(isFranchise ? advanced.franchiseMaintenanceMonthly : 0, [0, 0, 0, 0]);
@@ -775,7 +849,9 @@ export function calculateModel(data) {
 
   const rows = [
     line("Fixed asset investment (CEP Value)", series(cepValue, 0, 0, cepValue, 0, 0, 0, 0), { emphasis: false }),
-    line("Average Stock", annualMonthly(number(project.sft) * number(advanced.stockPerSft), [0, 0, 0, 0])),
+    // Average stock is a balance, not a monthly flow - annualising it multiplied
+    // the printed figure by 12.
+    line("Average Stock", series(...Array(8).fill(number(project.sft) * number(advanced.stockPerSft)))),
     line("Stock Holding Days", sales.map((value, index) => safeDivide((number(project.sft) * number(advanced.stockPerSft)) * (index < 3 ? 30 : 365), value * (1 - gpRates[index]))), { type: "number" }),
     line("Area in SFT", series(project.sft, project.sft, project.sft, project.sft, project.sft, project.sft, project.sft, project.sft), { type: "number" }),
     line("Day Average Foot Fall", footfall, { type: "number" }),
@@ -894,6 +970,9 @@ export function calculateModel(data) {
       gpShare,
       cepValue,
       decorationCost: decorationCostValue,
+      electricityMonthly: electricityMonthlyValue,
+      autoElectricityMonthly,
+      electricityBand: `${electricityBandLabel(project.sft)}${yes(project.pnp) ? "Y" : "N"}`,
       autoDecorationCost,
       decorationCostIsAuto,
       initialInvestment,
@@ -964,6 +1043,29 @@ function extractLookup(workbook) {
   return { gpLookup, basketLookup };
 }
 
+// Averages Electricity!F by the sheet's own "Unique" key (size band + P&P flag),
+// mirroring the AVERAGEIFS the workbook uses.
+function readElectricityTable(workbook) {
+  const sheet = workbook?.Sheets?.Electricity;
+  if (!sheet) return null;
+  const totals = new Map();
+  for (let row = 2; row <= 6000; row += 1) {
+    const key = getCell(workbook, "Electricity", `E${row}`);
+    const value = Number(getCell(workbook, "Electricity", `F${row}`));
+    if (key === undefined || key === null || String(key).trim() === "") continue;
+    if (!Number.isFinite(value)) continue;
+    const name = String(key).trim().toUpperCase();
+    const entry = totals.get(name) || { sum: 0, count: 0 };
+    entry.sum += value;
+    entry.count += 1;
+    totals.set(name, entry);
+  }
+  if (totals.size === 0) return null;
+  const table = {};
+  totals.forEach((entry, name) => { table[name] = entry.sum / entry.count; });
+  return table;
+}
+
 export function extractFromWorkbook(workbook, sourceName = "Imported workbook") {
   const required = ["Sales forecasting tools", "INFORMATION", "AUTO GENERATED FEASIBILITY"];
   const missingSheets = required.filter((name) => !workbook?.Sheets?.[name]);
@@ -1011,6 +1113,15 @@ export function extractFromWorkbook(workbook, sourceName = "Imported workbook") 
   // B19 normally holds the formula result, so importing it as a fixed number
   // would freeze decoration cost at the imported workbook's SFT/P&P. Only keep it
   // as a manual override when the sheet genuinely disagrees with the rule.
+  // Stock write-off rate lives in the feasibility sheet, not in the app's defaults.
+  data.advanced.stockWriteOffRate = pickNumber(
+    getCell(workbook, "AUTO GENERATED FEASIBILITY", "B42"),
+    data.advanced.stockWriteOffRate,
+  );
+  // Rebuild the electricity averages from the workbook's own Electricity sheet so
+  // an updated sheet always beats the built-in fallback table.
+  data.advanced.electricityTable = readElectricityTable(workbook);
+
   const importedDecoration = pickNumber(get(informationSheet, "B19"), null);
   if (importedDecoration === null || importedDecoration === undefined) {
     data.information.decorationCostOverride = null;

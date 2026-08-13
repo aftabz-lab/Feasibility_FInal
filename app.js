@@ -459,7 +459,7 @@ function renderDataEntry() {
           ${textField("Rent escalation", "advanced.rentEscalation", { type: "number", min: 0, max: 1, step: 0.0001 })}
           ${textField("Rent escalates from year", "advanced.rentEscalationStartsYear", { type: "number", min: 2, max: 5, step: 1 })}
           ${textField("Rent VAT rate", "advanced.rentVatRate", { type: "number", min: 0, max: 1, step: 0.0001 })}
-          ${textField("Franchise electricity / month", "advanced.franchiseElectricityMonthly", { type: "number", min: 0, step: 1 })}
+          ${textField("Franchise electricity / month", "advanced.franchiseElectricityMonthlyOverride", { type: "number", min: 0, step: 1, hint: `Blank = auto ৳ ${formatMoney(model.inputs.autoElectricityMonthly)} · band ${model.inputs.electricityBand}` })}
           ${textField("Franchise electricity escalation", "advanced.franchiseElectricityEscalation", { type: "number", min: 0, max: 1, step: 0.0001 })}
           ${textField("Franchise maintenance / month", "advanced.franchiseMaintenanceMonthly", { type: "number", min: 0, step: 1 })}
           ${textField("Franchise generator / month", "advanced.franchiseGeneratorMonthly", { type: "number", min: 0, step: 1 })}
