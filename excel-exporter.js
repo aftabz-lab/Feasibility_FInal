@@ -15,6 +15,8 @@ const COLORS = {
   white: "FFFFFF",
   red: "FFC7CE",
   redDark: "9C0006",
+  redText: "C00000",
+  scoreGreen: "92D050",
 };
 
 const MONEY_FORMAT = '#,##0;[Red](#,##0);-';
@@ -50,6 +52,27 @@ function clearMerges(worksheet) {
       // Range was already released - nothing to undo.
     }
   }
+}
+
+// Reusing a loaded worksheet keeps stale internal state that survives
+// spliceRows(): cached cell addresses (which end up one row out and make Excel
+// report "we found a problem with some content"), old merge definitions, shared
+// formula masters, and every image already anchored to the sheet - the cause of
+// duplicated/scattered signatures. Dropping the sheet and recreating it under the
+// same name clears all of that at once. Cross-sheet formulas reference sheets by
+// NAME, so the hidden dependency sheets keep working.
+function recreateSheet(workbook, name, options) {
+  const existing = workbook.getWorksheet(name);
+  if (existing) {
+    try {
+      workbook.removeWorksheet(existing.id);
+    } catch (error) {
+      // Fall back to clearing in place if the sheet cannot be removed.
+      resetSheet(existing);
+      return existing;
+    }
+  }
+  return workbook.addWorksheet(name, options);
 }
 
 function resetSheet(worksheet) {
@@ -159,10 +182,61 @@ async function toBase64(asset) {
   return null;
 }
 
+// Excel cannot draw the signing line over an image the way the PDF does, so an
+// opaque signature would hide the line underneath it. Any near-white pixel is
+// knocked out to fully transparent before the image is embedded, which lets the
+// dashed baseline show through exactly as it does in the PDF. Files that are
+// already transparent are unaffected. Runs in the browser only - if there is no
+// canvas the original image is used unchanged.
+const SIGNATURE_WHITE_CUTOFF = 235;
+
+async function withTransparentBackground(base64, extension) {
+  if (typeof document === "undefined" || typeof document.createElement !== "function") return null;
+  if (typeof Image !== "function") return null;
+  return new Promise((resolve) => {
+    const image = new Image();
+    image.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = image.naturalWidth || image.width;
+        canvas.height = image.naturalHeight || image.height;
+        if (!canvas.width || !canvas.height) { resolve(null); return; }
+        const context = canvas.getContext("2d");
+        if (!context) { resolve(null); return; }
+        context.drawImage(image, 0, 0);
+        const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+        const values = pixels.data;
+        for (let index = 0; index < values.length; index += 4) {
+          if (
+            values[index] >= SIGNATURE_WHITE_CUTOFF
+            && values[index + 1] >= SIGNATURE_WHITE_CUTOFF
+            && values[index + 2] >= SIGNATURE_WHITE_CUTOFF
+          ) {
+            values[index + 3] = 0;
+          }
+        }
+        context.putImageData(pixels, 0, 0);
+        resolve(canvas.toDataURL("image/png").split(",")[1] || null);
+      } catch (error) {
+        // A tainted canvas or unsupported image must not stop the export.
+        resolve(null);
+      }
+    };
+    image.onerror = () => resolve(null);
+    image.src = `data:image/${extension || "png"};base64,${base64}`;
+  });
+}
+
 async function placeSignature(workbook, worksheet, asset, col, row, width = 118, height = 45) {
   const base64 = await toBase64(asset);
   if (!base64) return;
-  const imageId = workbook.addImage({ base64, extension: asset.extension || "png" });
+  if (asset.transparentBase64 === undefined) {
+    asset.transparentBase64 = await withTransparentBackground(base64, asset.extension);
+  }
+  const imageId = workbook.addImage({
+    base64: asset.transparentBase64 || base64,
+    extension: asset.transparentBase64 ? "png" : (asset.extension || "png"),
+  });
   worksheet.addImage(imageId, { tl: { col, row }, ext: { width, height } });
 }
 
@@ -182,15 +256,88 @@ function columnPositionForPixels(widths, startColumn, offsetPixels) {
   return widths.length - 1;
 }
 
-async function placeCenteredSignature(workbook, worksheet, asset, startColumn, endColumn, signatureRow, widths) {
-  const blockPixels = widths.slice(startColumn - 1, endColumn).reduce((total, width) => total + columnWidthToPixels(width), 0);
-  const imageWidth = Math.max(58, Math.min(104, Math.round(blockPixels * 0.55)));
+
+// Divide the sheet width into `count` blocks of near-equal PIXEL width, snapped
+// to real column boundaries (merged cells can only start/end on a column edge).
+// Equal column COUNTS would look lop-sided here because the columns themselves
+// differ in width, so the split is done on measured pixels instead.
+// Master and the other calculation sheets are deliberately kept in the file so
+// every formula keeps resolving, but they are never meant to be browsed. Master
+// is marked veryHidden so it cannot be brought back through Excel's Unhide
+// dialog; the rest stay normally hidden.
+const ALWAYS_VERY_HIDDEN = new Set(["Master", "Stock WRT.O_Final"]);
+
+function applySheetVisibility(workbook, visibleSheets) {
+  workbook.eachSheet((sheet) => {
+    if (visibleSheets.has(sheet.name)) {
+      sheet.state = "visible";
+      return;
+    }
+    sheet.state = ALWAYS_VERY_HIDDEN.has(sheet.name) ? "veryHidden" : "hidden";
+  });
+}
+
+function splitColumnsEvenly(widths, count) {
+  const pixels = widths.map(columnWidthToPixels);
+  const total = pixels.reduce((sum, value) => sum + value, 0);
+  const cumulative = [];
+  let running = 0;
+  pixels.forEach((value) => { running += value; cumulative.push(running); });
+
+  const ranges = [];
+  let startColumn = 1;
+  for (let index = 1; index <= count; index += 1) {
+    let endColumn;
+    if (index === count) {
+      endColumn = widths.length;
+    } else {
+      const target = (total * index) / count;
+      const lastAllowed = widths.length - (count - index);
+      let best = startColumn;
+      let bestDistance = Infinity;
+      for (let column = startColumn; column <= lastAllowed; column += 1) {
+        const distance = Math.abs(cumulative[column - 1] - target);
+        if (distance < bestDistance) { bestDistance = distance; best = column; }
+      }
+      endColumn = best;
+    }
+    ranges.push([startColumn, endColumn]);
+    startColumn = endColumn + 1;
+  }
+  return ranges;
+}
+
+// Same approval form as the PDF: four signatures on the first row, then rows of
+// three. Keeping one source of truth means Excel and PDF never drift apart.
+function signatureRowGroups(signatories) {
+  const groups = [];
+  if (signatories.length === 0) return groups;
+  groups.push(signatories.slice(0, 4));
+  for (let start = 4; start < signatories.length; start += 3) {
+    groups.push(signatories.slice(start, start + 3));
+  }
+  return groups.filter((group) => group.length > 0);
+}
+
+async function placeSignatureInBlock(workbook, worksheet, asset, startColumn, endColumn, blockRow, widths) {
+  if (!asset) return;
+  const pixels = widths.map(columnWidthToPixels);
+  const blockPixels = pixels.slice(startColumn - 1, endColumn).reduce((sum, value) => sum + value, 0);
+  const imageWidth = Math.max(64, Math.min(150, Math.round(blockPixels * 0.62)));
   const leftOffset = Math.max(0, (blockPixels - imageWidth) / 2);
   const col = columnPositionForPixels(widths, startColumn, leftOffset);
-  // Position the image centred above the dashed signing baseline, matching the
-  // PDF layout. Keeping the lower edge just above the line prevents the ink
-  // from drifting into the role/name rows in Excel.
-  return placeSignature(workbook, worksheet, asset, col, signatureRow - 1 + 0.05, imageWidth, 34);
+  // Start the ink partway down the signing row so the lower part of the
+  // signature carries on past the dashed baseline - the signature crosses the
+  // line rather than resting on top of it, matching the PDF.
+  await placeSignature(workbook, worksheet, asset, col, blockRow + 0.10, imageWidth, 50);
+}
+
+function applySignatureLine(worksheet, startColumn, endColumn, blockRow) {
+  for (let column = startColumn; column <= endColumn; column += 1) {
+    const cell = worksheet.getCell(blockRow, column);
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: rgb(COLORS.white) };
+    cell.border = { bottom: { style: "dashed", color: rgb(COLORS.line) } };
+  }
 }
 
 async function addSourceSignature(workbook, worksheet, assets, endRow, widths, label) {
@@ -203,7 +350,7 @@ async function addSourceSignature(workbook, worksheet, assets, endRow, widths, l
   lineCell.fill = { type: "pattern", pattern: "solid", fgColor: rgb(COLORS.white) };
   lineCell.border = { bottom: { style: "dashed", color: rgb(COLORS.line) } };
   worksheet.getRow(signatureRow).height = 31;
-  await placeCenteredSignature(workbook, worksheet, sourceAsset, 1, endColumn, signatureRow, widths);
+  await placeSignatureInBlock(workbook, worksheet, sourceAsset, 1, endColumn, signatureRow, widths);
 
   safeMerge(worksheet, signatureRow + 1, 1, signatureRow + 1, endColumn);
   const caption = worksheet.getCell(signatureRow + 1, 1);
@@ -251,107 +398,272 @@ function addPositiveNegativeRules(sheet, reference) {
   }
 }
 
-async function addScoreSheet(workbook, data, model, assets) {
-  let sheet = workbook.getWorksheet("Sales forecasting tools");
-  if (!sheet) sheet = workbook.addWorksheet("Sales forecasting tools", { properties: { defaultRowHeight: 20 } });
-  else resetSheet(sheet);
-  sheet.views = [{ showGridLines: false, state: "frozen", ySplit: 2 }];
-  sheet.pageSetup = { orientation: "landscape", paperSize: 9, fitToPage: true, fitToWidth: 1, fitToHeight: 1, margins: { left: 0.25, right: 0.25, top: 0.3, bottom: 0.3, header: 0.1, footer: 0.1 } };
-  const scoreWidths = [6, 38, 14, 11, 31, 18, 14, 15, 15];
-  setColWidths(sheet, scoreWidths);
-  applyTitle(sheet, "A1:I1", "Sales Forecasting Format");
-  sheet.getRow(1).height = 27;
-  const header = sheet.getRow(3);
-  ["SL", "Description", "Weightage", "Target", "Measuring Tools", "Answers", "Mark", "Achievement", "Status"].forEach((value, index) => { header.getCell(index + 1).value = value; });
-  styleHeader(header);
+// Descriptions and measuring tools exactly as they appear in the source
+// "Sales Forecasting Format" sheet. They are indexed against the 14 scoring rows
+// returned by calculateForecastScore(); the model label is used if the list ever
+// falls out of step with the model.
+const SCORE_ROW_LABELS = [
+  "Population Density/Residential Area",
+  "House Rent/Income Level",
+  "Location Type",
+  "Market/Bazar/Shopping Mall/Other Brands",
+  "Avg. Sales of Departmental Stores",
+  "Road Status",
+  "Mosque/Mandir/Girza",
+  "School/College/University",
+  "Bank/Office/ATM BOOTH",
+  "Competitor Presence with Avg Sales",
+  "CNG, Bus, Train Station/ Pick & Drop",
+  "Front Fasia",
+  "Signboard Visibility",
+  "Hotel & Restaurant & Hospital/ Club",
+];
 
-  const answers = [
-    { label: "Location Size Range", answer: data.project.sft, tool: "SFT", weight: null, mark: null },
-    ...model.forecastScore.rows.map((row) => ({
-      label: row.label,
-      answer: row.answer,
-      tool: "Assessment input",
-      weight: row.weight,
-      mark: row.mark,
-    })),
-  ];
-  answers.forEach((item, index) => {
-    const row = sheet.getRow(index + 4);
-    row.values = [index + 1, item.label, item.weight ?? "", item.weight ? 100 : "", item.tool, item.answer, item.mark ?? "", item.weight ? item.mark * item.weight : "", item.weight ? "Calculated" : "Reference"];
-    row.eachCell((cell, column) => styleCell(cell, column === 3 || column === 8 ? "percent" : column === 4 || column === 7 ? "integer" : "text", column === 6 ? COLORS.yellow : null, column === 2));
-    if (item.weight === null) {
-      row.getCell(3).numFmt = "@";
-      row.getCell(8).numFmt = "@";
-    }
-  });
-  const scoreRow = sheet.getRow(answers.length + 4);
-  scoreRow.getCell(2).value = "Forecasting Score";
-  scoreRow.getCell(3).value = 1;
-  scoreRow.getCell(8).value = model.forecastScore.total / 100;
-  scoreRow.getCell(9).value = model.forecastScore.total >= 75 ? "Strong" : model.forecastScore.total >= 60 ? "Review" : "Risk";
-  scoreRow.eachCell((cell, column) => styleCell(cell, column === 3 || column === 8 ? "percent" : "text", COLORS.green, true));
+const SCORE_ROW_TOOLS = [
+  "High/Medium/Low",
+  "A/B/C",
+  null, // Location Type shows its answer across the Measuring Tools + Answers cells
+  "Within Bazar/Near Bazar",
+  "Avg per Day Sales",
+  "Main Road/Support Road/Block",
+  "How Many",
+  "How Many",
+  "How Many",
+  "Avg per Day Sales",
+  "Y/N",
+  "Long-feet",
+  "High/Medium/Low",
+  "How Many",
+];
 
-  const detailStart = answers.length + 7;
-  safeMerge(sheet, `A${detailStart}:C${detailStart}`);
-  sheet.getCell(`A${detailStart}`).value = "PROJECT & REFERENCE INFORMATION";
-  styleSectionTitle(sheet.getCell(`A${detailStart}`));
-  const detailRows = [
-    ["Enter Location Area", data.project.locationArea, "text"],
-    ["Enter Division Name", data.project.division, "text"],
-    ["Dhaka / Out of Dhaka", `${model.dhakaClassification} (${model.inputs.areaOutsideDhaka})`, "text"],
-    ["P&P (Y OR N)", data.project.pnp, "text"],
-    ["FR/OWN", data.project.frOwn, "text"],
-    ["GP%", model.inputs.gpPercent, "percent"],
-    ["GP% source", model.sources.gpPercent, "text"],
-    ["GP Share", model.inputs.gpShare, "percent"],
-    ["GP Share source", model.sources.gpShare, "text"],
-    ["Sales (Reference)/Day", data.reference.referenceSalesPerDay, "currency"],
-    ["FF (Reference)/Day", data.reference.referenceFootfall, "number"],
-    ["Basket (Reference)", data.reference.referenceBasket, "number"],
-    ["Projected Basket Size", model.inputs.basketSize, "number"],
-    ["Projected Per Day Sales", model.inputs.dailySales, "currency"],
-    ["Projected Daily Footfall", model.inputs.dailyFootfall, "number"],
-    ["Existing outlets around 1 KM", data.project.existingOutlets, "integer"],
-  ];
-  detailRows.forEach(([label, value, type], index) => {
-    const rowNo = detailStart + 1 + index;
-    safeMerge(sheet, `A${rowNo}:B${rowNo}`);
-    sheet.getCell(`A${rowNo}`).value = label;
-    sheet.getCell(`C${rowNo}`).value = value;
-    styleCell(sheet.getCell(`A${rowNo}`), "text", index > 11 ? COLORS.peach : null, index > 11);
-    styleCell(sheet.getCell(`C${rowNo}`), type, index === 13 || index === 14 ? COLORS.yellow : null, index > 11);
-  });
-
-  const categoryStart = detailStart;
-  safeMerge(sheet, `E${categoryStart}:I${categoryStart}`);
-  sheet.getCell(`E${categoryStart}`).value = "CATEGORY WISE SALES MIX";
-  styleSectionTitle(sheet.getCell(`E${categoryStart}`));
-  const categoryHeader = sheet.getRow(categoryStart + 1);
-  ["Category", "Mix", "Per Day Sales", "Monthly Sales", ""].forEach((value, index) => { categoryHeader.getCell(index + 5).value = value; });
-  styleHeader(categoryHeader);
-  model.categories.forEach((category, index) => {
-    const row = sheet.getRow(categoryStart + 2 + index);
-    row.getCell(5).value = category.name;
-    row.getCell(6).value = category.mix;
-    row.getCell(7).value = category.perDaySales;
-    row.getCell(8).value = category.monthlySales;
-    [5, 6, 7, 8].forEach((col) => styleCell(row.getCell(col), col === 6 ? "percent" : col > 6 ? "currency" : "text", null, false));
-  });
-  const categoryTotalRow = sheet.getRow(categoryStart + 2 + model.categories.length);
-  categoryTotalRow.getCell(5).value = "Total";
-  categoryTotalRow.getCell(6).value = 1;
-  categoryTotalRow.getCell(7).value = model.inputs.dailySales;
-  categoryTotalRow.getCell(8).value = model.inputs.monthlySales;
-  [5, 6, 7, 8].forEach((col) => styleCell(categoryTotalRow.getCell(col), col === 6 ? "percent" : col > 6 ? "currency" : "text", COLORS.green, true));
-  const finalRow = Math.max(detailStart + detailRows.length, categoryTotalRow.number);
-  const signatureEndRow = await addSourceSignature(workbook, sheet, assets, finalRow, scoreWidths, "Source Signature 1");
-  sheet.pageSetup.printArea = `A1:I${signatureEndRow}`;
+function scoreBorder() {
+  return border("thin", COLORS.black);
 }
 
+function scoreHeaderCell(cell, value) {
+  cell.value = value;
+  cell.font = { name: "Aptos", size: 11, bold: true, color: rgb(COLORS.black) };
+  cell.fill = { type: "pattern", pattern: "solid", fgColor: rgb(COLORS.scoreGreen) };
+  cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+  cell.border = scoreBorder();
+}
+
+function scoreBodyCell(cell, options = {}) {
+  cell.font = {
+    name: "Aptos",
+    size: 10,
+    bold: options.bold === true,
+    color: rgb(options.color || COLORS.black),
+  };
+  cell.alignment = {
+    horizontal: options.align || "center",
+    vertical: "middle",
+    wrapText: options.wrap !== false,
+  };
+  cell.border = scoreBorder();
+  if (options.fill) cell.fill = { type: "pattern", pattern: "solid", fgColor: rgb(options.fill) };
+  if (options.numFmt) cell.numFmt = options.numFmt;
+}
+
+async function addScoreSheet(workbook, data, model, assets) {
+  const sheet = recreateSheet(workbook, "Sales forecasting tools", { properties: { defaultRowHeight: 18 } });
+  sheet.views = [{ showGridLines: false }];
+  sheet.pageSetup = {
+    orientation: "landscape",
+    paperSize: 9,
+    fitToPage: true,
+    fitToWidth: 1,
+    fitToHeight: 1,
+    margins: { left: 0.25, right: 0.25, top: 0.3, bottom: 0.3, header: 0.1, footer: 0.1 },
+  };
+  // A..H mirror the source format: SL, Description, Weightage, Target,
+  // Measuring Tools, Answers, Mark, Achievement.
+  const scoreWidths = [4, 42, 20, 12, 30, 16, 12, 14];
+  setColWidths(sheet, scoreWidths);
+
+  safeMerge(sheet, "A1:H1");
+  const title = sheet.getCell("A1");
+  title.value = "Sales Forecasting Format";
+  title.font = { name: "Aptos Display", size: 16, bold: true, color: rgb(COLORS.black) };
+  title.alignment = { horizontal: "center", vertical: "middle" };
+  sheet.getRow(1).height = 26;
+
+  const headerRow = sheet.getRow(2);
+  ["SL", "Description", "Weightage", "Target", "Measuring Tools", "Answers", "Mark", "Achievement"]
+    .forEach((label, index) => scoreHeaderCell(headerRow.getCell(index + 1), label));
+  headerRow.height = 32;
+
+  // Row 1 of the form is the location size reference: no weight, no mark.
+  const scoreRows = model.forecastScore.rows || [];
+  const formRows = [
+    {
+      label: "Location Size Range",
+      weight: null,
+      tool: "SFT",
+      answer: data.project.sft,
+      mark: null,
+      achievement: null,
+    },
+    ...scoreRows.map((row, index) => ({
+      label: SCORE_ROW_LABELS[index] || row.label,
+      weight: row.weight,
+      tool: SCORE_ROW_TOOLS[index] ?? null,
+      answer: row.answer,
+      mark: row.mark,
+      // Weight is a fraction (0.15) and mark is out of 100, so the achieved
+      // share is weight x mark / 100. Without the /100 the percent format
+      // renders 15% as 1500%.
+      achievement: (Number(row.weight) * Number(row.mark)) / 100,
+    })),
+  ];
+
+  const firstDataRow = 3;
+  formRows.forEach((item, index) => {
+    const rowNumber = firstDataRow + index;
+    const row = sheet.getRow(rowNumber);
+    row.height = 20;
+
+    scoreBodyCell(row.getCell(1), { bold: true });
+    row.getCell(1).value = index + 1;
+
+    scoreBodyCell(row.getCell(2), { align: "left", bold: true });
+    row.getCell(2).value = item.label;
+
+    scoreBodyCell(row.getCell(3), { bold: true, numFmt: item.weight === null ? "@" : "0%" });
+    row.getCell(3).value = item.weight === null ? "" : item.weight;
+
+    scoreBodyCell(row.getCell(4), { bold: true });
+    row.getCell(4).value = item.weight === null ? "" : 100;
+
+    if (item.tool === null) {
+      // Location Type: the chosen type fills the Measuring Tools + Answers cells.
+      safeMerge(sheet, rowNumber, 5, rowNumber, 6);
+      scoreBodyCell(row.getCell(5), { bold: true, fill: COLORS.yellow, color: COLORS.blue });
+      row.getCell(5).value = item.answer ?? "";
+      scoreBodyCell(row.getCell(6), { fill: COLORS.yellow });
+    } else {
+      scoreBodyCell(row.getCell(5), { color: COLORS.blue });
+      row.getCell(5).value = item.tool;
+      scoreBodyCell(row.getCell(6), { bold: true, fill: COLORS.yellow, color: COLORS.blue });
+      row.getCell(6).value = item.answer ?? "";
+    }
+
+    scoreBodyCell(row.getCell(7), { numFmt: item.mark === null ? "@" : INTEGER_FORMAT });
+    row.getCell(7).value = item.mark === null ? "" : item.mark;
+
+    scoreBodyCell(row.getCell(8), { numFmt: item.achievement === null ? "@" : "0%" });
+    row.getCell(8).value = item.achievement === null ? "" : item.achievement;
+  });
+
+  const totalRowNumber = firstDataRow + formRows.length;
+  const totalRow = sheet.getRow(totalRowNumber);
+  totalRow.height = 20;
+  for (let column = 1; column <= 8; column += 1) scoreBodyCell(totalRow.getCell(column), { bold: true });
+  totalRow.getCell(3).value = 1;
+  totalRow.getCell(3).numFmt = "0%";
+  totalRow.getCell(8).value = Number(model.forecastScore.total) / 100;
+  totalRow.getCell(8).numFmt = "0%";
+
+  const blockStart = totalRowNumber + 2;
+
+  const referenceRows = [
+    ["Enter Location Area", data.project.locationArea, "text", "highlight"],
+    ["Enter  Division Name", data.project.division, "text", "highlight"],
+    ["P&P (Y OR N)", data.project.pnp, "text", "highlight"],
+    ["GP%", model.inputs.gpPercent, "percent", "plain"],
+    ["Dhaka/out of Dhaka", model.dhakaClassification, "text", "plain"],
+    ["Sales (Reference)", data.reference.referenceSalesPerDay, "integer", "plain"],
+    ["FF (Reference)/Day", data.reference.referenceFootfall, "integer", "plain"],
+    ["Basket (Reference)", data.reference.referenceBasket, "integer", "plain"],
+    ["Profit (Reference)", data.reference.referenceProfit, "integer", "plain"],
+    ["Projected Basket Size (Reference)", model.inputs.basketSize, "integer", "plain"],
+    ["Projected Per Day Sales for this new location", model.inputs.dailySales, "integer", "input"],
+    ["Projected Daily Footfall for this new location", model.inputs.dailyFootfall, "integer", "input"],
+    ["Existing No. of outlets around 1 KM radius", data.project.existingOutlets, "integer", "input"],
+  ];
+
+  referenceRows.forEach(([label, value, type, kind], index) => {
+    const rowNumber = blockStart + index;
+    const row = sheet.getRow(rowNumber);
+    safeMerge(sheet, rowNumber, 1, rowNumber, 2);
+    safeMerge(sheet, rowNumber, 3, rowNumber, 4);
+    const labelCell = row.getCell(1);
+    const valueCell = row.getCell(3);
+    labelCell.value = label;
+    valueCell.value = value === undefined || value === null ? "" : value;
+
+    const labelColor = kind === "highlight" ? COLORS.redText : COLORS.blue;
+    scoreBodyCell(labelCell, {
+      bold: kind !== "plain",
+      color: labelColor,
+      fill: kind === "input" ? COLORS.peach : null,
+    });
+    scoreBodyCell(valueCell, {
+      bold: kind !== "plain",
+      color: COLORS.black,
+      fill: kind === "plain" ? null : COLORS.yellow,
+      numFmt: type === "percent" ? "0.0%" : type === "integer" ? INTEGER_FORMAT : null,
+    });
+    row.height = index === 0 ? 40 : 20;
+  });
+
+  const categoryTitleRow = blockStart;
+  safeMerge(sheet, categoryTitleRow, 5, categoryTitleRow, 8);
+  const categoryTitle = sheet.getCell(categoryTitleRow, 5);
+  categoryTitle.value = "Category wise Sales Mix";
+  categoryTitle.font = { name: "Aptos", size: 11, bold: true, underline: true, color: rgb(COLORS.black) };
+  categoryTitle.alignment = { horizontal: "center", vertical: "middle" };
+
+  const categoryHeaderRow = categoryTitleRow + 1;
+  safeMerge(sheet, categoryHeaderRow, 5, categoryHeaderRow, 6);
+  scoreBodyCell(sheet.getCell(categoryHeaderRow, 5), { bold: true, fill: COLORS.sky });
+  sheet.getCell(categoryHeaderRow, 5).value = "Category";
+  scoreBodyCell(sheet.getCell(categoryHeaderRow, 6), { fill: COLORS.sky });
+  scoreBodyCell(sheet.getCell(categoryHeaderRow, 7), { bold: true, fill: COLORS.sky });
+  sheet.getCell(categoryHeaderRow, 7).value = "Per Day Sales";
+  scoreBodyCell(sheet.getCell(categoryHeaderRow, 8), { bold: true, fill: COLORS.sky });
+  sheet.getCell(categoryHeaderRow, 8).value = "Monthly Sales";
+  sheet.getRow(categoryHeaderRow).height = 34;
+
+  // Fresh categories are shown in red in the source format.
+  const RED_CATEGORIES = new Set(["Perishables", "Protein"]);
+  (model.categories || []).forEach((category, index) => {
+    const rowNumber = categoryHeaderRow + 1 + index;
+    const row = sheet.getRow(rowNumber);
+    safeMerge(sheet, rowNumber, 5, rowNumber, 6);
+    row.getCell(5).value = category.name;
+    scoreBodyCell(row.getCell(5), {
+      align: "left",
+      bold: true,
+      color: RED_CATEGORIES.has(category.name) ? COLORS.redText : COLORS.black,
+    });
+    scoreBodyCell(row.getCell(6), {});
+    row.getCell(7).value = category.perDaySales;
+    scoreBodyCell(row.getCell(7), { align: "right", numFmt: INTEGER_FORMAT });
+    row.getCell(8).value = category.monthlySales;
+    scoreBodyCell(row.getCell(8), { align: "right", bold: true, numFmt: INTEGER_FORMAT });
+    row.height = 18;
+  });
+
+  const categoryTotalRow = categoryHeaderRow + 1 + (model.categories || []).length;
+  safeMerge(sheet, categoryTotalRow, 5, categoryTotalRow, 6);
+  scoreBodyCell(sheet.getCell(categoryTotalRow, 5), {});
+  scoreBodyCell(sheet.getCell(categoryTotalRow, 6), {});
+  sheet.getCell(categoryTotalRow, 7).value = model.inputs.dailySales;
+  scoreBodyCell(sheet.getCell(categoryTotalRow, 7), { align: "right", bold: true, numFmt: INTEGER_FORMAT });
+  sheet.getCell(categoryTotalRow, 8).value = model.inputs.monthlySales;
+  scoreBodyCell(sheet.getCell(categoryTotalRow, 8), { align: "right", bold: true, numFmt: INTEGER_FORMAT });
+
+  // Signature sits under the reference block on the left, as in the source sheet.
+  const referenceEndRow = blockStart + referenceRows.length - 1;
+  const signatureEndRow = await addSourceSignature(workbook, sheet, assets, referenceEndRow, scoreWidths, "");
+  sheet.pageSetup.printArea = `A1:H${Math.max(signatureEndRow, categoryTotalRow)}`;
+}
+
+// ---- lower half: reference block (left) and category sales mix (right) ----
+
 async function addInformationSheet(workbook, data, model, assets) {
-  let sheet = workbook.getWorksheet("INFORMATION");
-  if (!sheet) sheet = workbook.addWorksheet("INFORMATION", { properties: { defaultRowHeight: 20 } });
-  else resetSheet(sheet);
+  const sheet = recreateSheet(workbook, "INFORMATION", { properties: { defaultRowHeight: 20 } });
   sheet.views = [{ showGridLines: false }];
   sheet.pageSetup = { orientation: "landscape", paperSize: 9, fitToPage: true, fitToWidth: 1, fitToHeight: 1, margins: { left: 0.25, right: 0.25, top: 0.3, bottom: 0.3, header: 0.1, footer: 0.1 } };
   setColWidths(sheet, [32, 26, 3, 24, 10, 13, 15, 3, 3, 3, 3]);
@@ -423,9 +735,7 @@ async function addInformationSheet(workbook, data, model, assets) {
 }
 
 async function addFeasibilitySheet(workbook, data, model, assets) {
-  let sheet = workbook.getWorksheet("AUTO GENERATED FEASIBILITY");
-  if (!sheet) sheet = workbook.addWorksheet("AUTO GENERATED FEASIBILITY", { properties: { defaultRowHeight: 18 } });
-  else resetSheet(sheet);
+  const sheet = recreateSheet(workbook, "AUTO GENERATED FEASIBILITY", { properties: { defaultRowHeight: 18 } });
   sheet.views = [{ showGridLines: false, state: "frozen", ySplit: 2, xSplit: 2 }];
   sheet.pageSetup = { orientation: "portrait", paperSize: 8, fitToPage: true, fitToWidth: 1, fitToHeight: 1, margins: { left: 0.2, right: 0.2, top: 0.3, bottom: 0.3, header: 0.1, footer: 0.1 } };
   const feasibilityWidths = [39, 14, 14, 14, 14, 3, 14, 14, 14, 14, 14, 16];
@@ -537,37 +847,42 @@ async function addFeasibilitySheet(workbook, data, model, assets) {
   });
 
   const signStart = rowIndex + metrics.length + 3;
-  const cols = [1, 4, 7, 10];
-  for (let index = 0; index < model.signatories.length; index += 1) {
-    const person = model.signatories[index];
-    const blockRow = signStart + Math.floor(index / cols.length) * 8;
-    const col = cols[index % cols.length];
-    // Keep the full line as two bordered cells. This avoids a line ending up beside the image after Excel renders it.
-    [col, col + 1].forEach((lineColumn) => {
-      const lineCell = sheet.getCell(blockRow, lineColumn);
-      lineCell.border = { bottom: { style: "dashed", color: rgb(COLORS.line) } };
-      lineCell.fill = { type: "pattern", pattern: "solid", fgColor: rgb(COLORS.white) };
-    });
+  const signatureGroups = signatureRowGroups(model.signatories);
+  const BLOCK_HEIGHT = 8;
+  for (let groupIndex = 0; groupIndex < signatureGroups.length; groupIndex += 1) {
+    const group = signatureGroups[groupIndex];
+    const ranges = splitColumnsEvenly(feasibilityWidths, group.length);
+    const blockRow = signStart + groupIndex * BLOCK_HEIGHT;
     sheet.getRow(blockRow).height = 30;
-    safeMerge(sheet, blockRow + 1, col, blockRow + 1, col + 1);
-    sheet.getCell(blockRow + 1, col).value = person.role;
-    sheet.getCell(blockRow + 1, col).alignment = { horizontal: "center", vertical: "middle" };
-    sheet.getCell(blockRow + 1, col).font = { name: "Aptos", size: 9 };
-    safeMerge(sheet, blockRow + 2, col, blockRow + 2, col + 1);
-    sheet.getCell(blockRow + 2, col).value = person.name;
-    sheet.getCell(blockRow + 2, col).alignment = { horizontal: "center", vertical: "middle", wrapText: true };
-    sheet.getCell(blockRow + 2, col).font = { name: "Aptos", size: 9, bold: true };
-    safeMerge(sheet, blockRow + 3, col, blockRow + 3, col + 1);
-    sheet.getCell(blockRow + 3, col).value = person.designation;
-    sheet.getCell(blockRow + 3, col).alignment = { horizontal: "center", vertical: "middle", wrapText: true };
-    sheet.getCell(blockRow + 3, col).font = { name: "Aptos", size: 8 };
     sheet.getRow(blockRow + 1).height = 18;
     sheet.getRow(blockRow + 2).height = 22;
     sheet.getRow(blockRow + 3).height = 27;
-    await placeCenteredSignature(workbook, sheet, getSignatureAsset(assets, person.signatureId), col, col + 1, blockRow, feasibilityWidths);
+    for (let index = 0; index < group.length; index += 1) {
+      const person = group[index];
+      const [startColumn, endColumn] = ranges[index];
+      applySignatureLine(sheet, startColumn, endColumn, blockRow);
+      const captions = [
+        [1, person.role, { name: "Aptos", size: 9 }],
+        [2, person.name, { name: "Aptos", size: 9, bold: true }],
+        [3, person.designation, { name: "Aptos", size: 8 }],
+      ];
+      for (const [offset, value, font] of captions) {
+        safeMerge(sheet, blockRow + offset, startColumn, blockRow + offset, endColumn);
+        const cell = sheet.getCell(blockRow + offset, startColumn);
+        cell.value = value || "";
+        cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+        cell.font = font;
+      }
+      // Mirror the PDF rule: the tick box controls the ink only. The dashed line,
+      // role and name always stay in place so the form can be signed by hand.
+      const asset = person.includeInPdf === true
+        ? getSignatureAsset(assets, person.signatureId)
+        : null;
+      await placeSignatureInBlock(workbook, sheet, asset, startColumn, endColumn, blockRow, feasibilityWidths);
+    }
   }
-  const signatureRows = Math.max(1, Math.ceil(model.signatories.length / cols.length));
-  sheet.pageSetup.printArea = `A1:L${signStart + signatureRows * 8 - 1}`;
+  const signatureRows = Math.max(1, signatureGroups.length);
+  sheet.pageSetup.printArea = `A1:L${signStart + signatureRows * BLOCK_HEIGHT - 1}`;
 }
 
 export async function buildValuesOnlyWorkbook(data, model, assets = []) {
@@ -589,9 +904,7 @@ export async function downloadValuesOnlyWorkbook(data, model, assets = []) {
     "INFORMATION",
     "AUTO GENERATED FEASIBILITY",
   ]);
-  workbook.eachSheet((ws) => {
-    ws.state = visibleSheets.has(ws.name) ? "visible" : "hidden";
-  });
+  applySheetVisibility(workbook, visibleSheets);
 
   const buffer = await workbook.xlsx.writeBuffer();
   const blob = new Blob([buffer], { type: XLSX_MIME });
@@ -603,6 +916,38 @@ export async function downloadValuesOnlyWorkbook(data, model, assets = []) {
   anchor.click();
   anchor.remove();
   window.setTimeout(() => URL.revokeObjectURL(anchor.href), 1000);
+}
+
+// Chromium browsers can open a real "Save as" dialog so the workbook goes
+// straight into a chosen PC folder under a chosen filename. Firefox/Safari have
+// no such API, and the picker also throws when the page is not in a secure or
+// user-activated context - both cases fall back to a normal download.
+async function saveBlobToChosenFolder(blob, suggestedName) {
+  const picker = globalThis.window?.showSaveFilePicker;
+  if (typeof picker === "function") {
+    let handle = null;
+    try {
+      handle = await picker.call(globalThis.window, {
+        suggestedName,
+        types: [{ description: "Excel Workbook", accept: { [XLSX_MIME]: [".xlsx"] } }],
+      });
+    } catch (error) {
+      // The user pressed Cancel - surface that instead of silently downloading.
+      if (error?.name === "AbortError") throw error;
+      handle = null;
+    }
+    if (handle) {
+      const writable = await handle.createWritable();
+      try {
+        await writable.write(blob);
+      } finally {
+        await writable.close();
+      }
+      return { method: "save-picker", fileName: handle.name || suggestedName };
+    }
+  }
+  downloadBlob(blob, suggestedName);
+  return { method: "browser-download", fileName: suggestedName };
 }
 
 function safeFileName(value, fallback = "Feasibility") {
@@ -673,11 +1018,7 @@ export async function downloadRulesWorkbook(
       "AUTO GENERATED FEASIBILITY",
     ]);
 
-    workbook.eachSheet((sheet) => {
-      sheet.state = visibleSheets.has(sheet.name)
-        ? "visible"
-        : "hidden";
-    });
+    applySheetVisibility(workbook, visibleSheets);
 
     const outputBuffer = await workbook.xlsx.writeBuffer();
 
@@ -697,11 +1038,11 @@ export async function downloadRulesWorkbook(
     const fileName =
       `${safeFileName(data?.project?.locationArea, "Feasibility")}_with_rules.xlsx`;
 
-    downloadBlob(blob, fileName);
+    const saved = await saveBlobToChosenFolder(blob, fileName);
 
     return {
-      method: "browser-download",
-      fileName,
+      method: saved.method,
+      fileName: saved.fileName,
       sourceName,
       size: outputBuffer.byteLength,
     };

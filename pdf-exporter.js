@@ -170,8 +170,10 @@ async function drawPageReviewSignature(doc, model, assets, position = {}) {
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
   const margin = 26;
-  const imageWidth = 78;
-  const imageHeight = 42;
+  // Signatures are drawn at twice their previous size; pages 1 and 2 have ample
+  // room below the final table, so this stays inside the same single page.
+  const imageWidth = 156;
+  const imageHeight = 84;
   // Pages 1 and 2 pass the lower edge of their final table so this mark stays
   // on the left immediately below the content, rather than floating at the
   // lower-right of the page.
@@ -477,7 +479,11 @@ async function drawSignatureBlocks(doc, y, model, assets, options = {}) {
     rows.push({ people: signatories.slice(start, start + 3), preferredLineWidth: 180, useFullPageWidth: true });
   }
 
-  const rowHeight = 76;
+  // Signatures are twice their old size (86x33 -> ~170x66) and the caption fonts
+  // are larger, so each block needs more vertical room. Page 3 is A3 portrait and
+  // had ~158pt of unused space at the bottom, which absorbs the extra height
+  // without pushing the approval form onto a fourth page.
+  const rowHeight = 124;
   const assetById = new Map(assets.map((asset) => [asset.id, asset]));
   let renderedRows = 0;
   for (const row of rows) {
@@ -496,17 +502,17 @@ async function drawSignatureBlocks(doc, y, model, assets, options = {}) {
       const person = rowSignatories[index];
       const lineX = rowAreaX + gap * (index + 1) + lineWidth * index;
       const x = lineX - 4;
-      const lineY = top + 27;
+      const lineY = top + 58;
       const dataUrl = person.includeInPdf === true ? await imageDataUrl(assetById.get(person.signatureId)) : null;
       if (dataUrl) {
-        const imageWidth = Math.min(86, lineWidth * 0.6);
-        const imageHeight = 33;
+        const imageWidth = Math.min(172, lineWidth);
+        const imageHeight = 66;
         const format = /image\/jpe?g/i.test(dataUrl) ? "JPEG" : "PNG";
         try {
           // Place the ink directly across the signing baseline. The dotted line is
           // intentionally drawn afterwards: many supplied signature PNGs include
           // an opaque white background, which would otherwise hide the line.
-          doc.addImage(dataUrl, format, lineX + (lineWidth - imageWidth) / 2, lineY - 16, imageWidth, imageHeight, undefined, "FAST");
+          doc.addImage(dataUrl, format, lineX + (lineWidth - imageWidth) / 2, lineY - 52, imageWidth, imageHeight, undefined, "FAST");
         } catch {
           // An unsupported upload should never stop the PDF export. The dashed line remains usable for a handwritten signature.
         }
@@ -518,9 +524,9 @@ async function drawSignatureBlocks(doc, y, model, assets, options = {}) {
       doc.setLineDashPattern([1.6, 1.8], 0);
       doc.line(lineX, lineY, lineX + lineWidth, lineY);
       doc.setLineDashPattern([], 0);
-      drawText(doc, person.role || "", x, top + 51, blockWidth, { size: 6.5, align: "center", color: COLORS.muted });
-      drawText(doc, person.name || "", x, top + 61, blockWidth, { size: 6.8, align: "center", bold: true });
-      drawText(doc, person.designation || "", x, top + 70, blockWidth, { size: 5.9, align: "center", color: COLORS.muted });
+      drawText(doc, person.role || "", x, top + 86, blockWidth, { size: 8.4, align: "center", color: COLORS.muted });
+      drawText(doc, person.name || "", x, top + 99, blockWidth, { size: 9.2, align: "center", bold: true });
+      drawText(doc, person.designation || "", x, top + 111, blockWidth, { size: 7.6, align: "center", color: COLORS.muted });
     }
     renderedRows += 1;
   }
@@ -544,7 +550,7 @@ async function drawFeasibilityPage(doc, data, model, assets) {
   }
   y = drawReturnSection(doc, table.x, y, table.width, data, model) + 17;
   drawRect(doc, signatureX, y, signatureWidth, 14, { fill: COLORS.white, borderColor: COLORS.line });
-  drawText(doc, "APPROVAL & SIGNATURES", signatureX, y + 9.5, signatureWidth, { size: 6.9, color: COLORS.navy, bold: true, align: "center" });
+  drawText(doc, "APPROVAL & SIGNATURES", signatureX, y + 10, signatureWidth, { size: 8.6, color: COLORS.navy, bold: true, align: "center" });
   await drawSignatureBlocks(doc, y + 12, model, assets, { x: signatureX, width: signatureWidth });
 }
 
