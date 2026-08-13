@@ -227,7 +227,8 @@ async function withTransparentBackground(base64, extension) {
   });
 }
 
-async function placeSignature(workbook, worksheet, asset, col, row, width = 118, height = 45) {
+async function placeSignature(workbook, worksheet, asset, anchor) {
+  if (!asset) return;
   const base64 = await toBase64(asset);
   if (!base64) return;
   if (asset.transparentBase64 === undefined) {
@@ -237,7 +238,54 @@ async function placeSignature(workbook, worksheet, asset, col, row, width = 118,
     base64: asset.transparentBase64 || base64,
     extension: asset.transparentBase64 ? "png" : (asset.extension || "png"),
   });
-  worksheet.addImage(imageId, { tl: { col, row }, ext: { width, height } });
+  // A two-cell anchor with explicit native (EMU) offsets. ExcelJS's fractional
+  // col/row shorthand converts against the DEFAULT row height, not the heights
+  // we set, so it lands the image in the wrong row; native offsets are exact.
+  // Excel also repairs one-cell anchors written by ExcelJS ("Drawing shape"),
+  // while two-cell anchors - what Excel itself writes - open cleanly.
+  worksheet.addImage(imageId, {
+    tl: {
+      nativeCol: anchor.leftColumn,
+      nativeColOff: pixelsToEmu(anchor.leftOffset),
+      nativeRow: anchor.topRow,
+      nativeRowOff: pixelsToEmu(anchor.topOffset),
+    },
+    br: {
+      nativeCol: anchor.rightColumn,
+      nativeColOff: pixelsToEmu(anchor.rightOffset),
+      nativeRow: anchor.bottomRow,
+      nativeRowOff: pixelsToEmu(anchor.bottomOffset),
+    },
+    editAs: "oneCell",
+  });
+}
+
+function pixelsToEmu(pixels) {
+  return Math.max(0, Math.round(Number(pixels) * 9525));
+}
+
+// Absolute pixel X across the sheet -> which column it falls in, plus the
+// offset inside that column.
+function resolveColumn(widths, absolutePixels) {
+  let remaining = Math.max(0, absolutePixels);
+  for (let index = 0; index < widths.length; index += 1) {
+    const columnPixels = columnWidthToPixels(widths[index]);
+    if (remaining < columnPixels) return { column: index, offset: remaining };
+    remaining -= columnPixels;
+  }
+  return { column: widths.length - 1, offset: 0 };
+}
+
+function pixelsBeforeColumn(widths, oneBasedColumn) {
+  let total = 0;
+  for (let index = 0; index < oneBasedColumn - 1 && index < widths.length; index += 1) {
+    total += columnWidthToPixels(widths[index]);
+  }
+  return total;
+}
+
+function pointsToPixels(points) {
+  return Math.round((Number(points) || 0) * (4 / 3));
 }
 
 function columnWidthToPixels(width) {
@@ -266,6 +314,50 @@ function columnPositionForPixels(widths, startColumn, offsetPixels) {
 // is marked veryHidden so it cannot be brought back through Excel's Unhide
 // dialog; the rest stay normally hidden.
 const ALWAYS_VERY_HIDDEN = new Set(["Master", "Stock WRT.O_Final"]);
+
+// ExcelJS can READ more conditional-formatting rule types than it can WRITE.
+// "duplicateValues" is one such type: the reader keeps it, the writer has no
+// serializer for it, so the <conditionalFormatting> container comes out with no
+// <cfRule> child. Excel treats that as invalid XML and offers to repair the
+// workbook. Only rule types that actually round-trip are kept.
+const WRITABLE_CF_RULES = new Set([
+  "cellIs",
+  "expression",
+  "containsText",
+  "notContainsText",
+  "beginsWith",
+  "endsWith",
+  "containsBlanks",
+  "notContainsBlanks",
+  "containsErrors",
+  "notContainsErrors",
+  "timePeriod",
+  "aboveAverage",
+  "top10",
+  "dataBar",
+  "colorScale",
+  "iconSet",
+]);
+
+// ExcelJS drops conditional-formatting rule types it does not understand (data
+// bars, colour scales, icon sets) but still writes the empty <conditionalFormatting>
+// container. A container with no <cfRule> child is invalid OOXML, and Excel reports
+// it as "part with XML error" and offers to repair the file. Strip those empties -
+// the rules were already lost by the reader, so nothing extra is sacrificed.
+function dropEmptyConditionalFormatting(workbook) {
+  workbook.eachSheet((sheet) => {
+    const formattings = sheet.conditionalFormattings;
+    if (!Array.isArray(formattings) || formattings.length === 0) return;
+    const kept = formattings
+      .map((entry) => {
+        if (!entry || !Array.isArray(entry.rules)) return null;
+        const rules = entry.rules.filter((rule) => WRITABLE_CF_RULES.has(rule?.type));
+        return rules.length > 0 ? { ...entry, rules } : null;
+      })
+      .filter(Boolean);
+    if (kept.length !== formattings.length) sheet.conditionalFormattings = kept;
+  });
+}
 
 function applySheetVisibility(workbook, visibleSheets) {
   workbook.eachSheet((sheet) => {
@@ -319,17 +411,50 @@ function signatureRowGroups(signatories) {
   return groups.filter((group) => group.length > 0);
 }
 
-async function placeSignatureInBlock(workbook, worksheet, asset, startColumn, endColumn, blockRow, widths) {
+async function placeSignatureInBlock(workbook, worksheet, asset, startColumn, endColumn, blockRow, widths, options = {}) {
   if (!asset) return;
-  const pixels = widths.map(columnWidthToPixels);
-  const blockPixels = pixels.slice(startColumn - 1, endColumn).reduce((sum, value) => sum + value, 0);
-  const imageWidth = Math.max(64, Math.min(150, Math.round(blockPixels * 0.62)));
-  const leftOffset = Math.max(0, (blockPixels - imageWidth) / 2);
-  const col = columnPositionForPixels(widths, startColumn, leftOffset);
-  // Start the ink partway down the signing row so the lower part of the
-  // signature carries on past the dashed baseline - the signature crosses the
-  // line rather than resting on top of it, matching the PDF.
-  await placeSignature(workbook, worksheet, asset, col, blockRow + 0.10, imageWidth, 50);
+  const blockLeft = pixelsBeforeColumn(widths, startColumn);
+  let blockPixels = 0;
+  for (let column = startColumn; column <= endColumn; column += 1) {
+    blockPixels += columnWidthToPixels(widths[column - 1]);
+  }
+
+  const imageWidth = Math.max(70, Math.min(options.maxWidth || 160, Math.round(blockPixels * 0.6)));
+  const imageHeight = options.height || 52;
+  // Centre the ink horizontally over the caption text, which is merged and
+  // centred across exactly the same columns.
+  const left = blockLeft + (blockPixels - imageWidth) / 2;
+  const leftEdge = resolveColumn(widths, left);
+  const rightEdge = resolveColumn(widths, left + imageWidth);
+
+  // The dashed line is the BOTTOM border of blockRow, so the boundary between
+  // blockRow and the row under it IS the line. Keeping ~72% of the signature
+  // above it and ~28% below makes the ink cross the line as it does on paper.
+  const aboveLine = Math.round(imageHeight * 0.72);
+  const belowLine = imageHeight - aboveLine;
+  const signingRowPixels = pointsToPixels(worksheet.getRow(blockRow).height || 30);
+  const captionRowPixels = pointsToPixels(worksheet.getRow(blockRow + 1).height || 18);
+
+  // nativeRow is 0-indexed, so blockRow (1-based) is nativeRow blockRow - 1.
+  let topRow = blockRow - 1;
+  let topOffset = signingRowPixels - aboveLine;
+  if (topOffset < 0) {
+    // Signature is taller than the signing row - start it in the row above.
+    const previousRowPixels = pointsToPixels(worksheet.getRow(blockRow - 1).height || 18);
+    topRow = blockRow - 2;
+    topOffset = Math.max(0, previousRowPixels + topOffset);
+  }
+
+  await placeSignature(workbook, worksheet, asset, {
+    leftColumn: leftEdge.column,
+    leftOffset: leftEdge.offset,
+    rightColumn: rightEdge.column,
+    rightOffset: rightEdge.offset,
+    topRow,
+    topOffset,
+    bottomRow: blockRow,
+    bottomOffset: Math.min(belowLine, captionRowPixels),
+  });
 }
 
 function applySignatureLine(worksheet, startColumn, endColumn, blockRow) {
@@ -350,7 +475,7 @@ async function addSourceSignature(workbook, worksheet, assets, endRow, widths, l
   lineCell.fill = { type: "pattern", pattern: "solid", fgColor: rgb(COLORS.white) };
   lineCell.border = { bottom: { style: "dashed", color: rgb(COLORS.line) } };
   worksheet.getRow(signatureRow).height = 31;
-  await placeSignatureInBlock(workbook, worksheet, sourceAsset, 1, endColumn, signatureRow, widths);
+  await placeSignatureInBlock(workbook, worksheet, sourceAsset, 1, endColumn, signatureRow, widths, { maxWidth: 150, height: 46 });
 
   safeMerge(worksheet, signatureRow + 1, 1, signatureRow + 1, endColumn);
   const caption = worksheet.getCell(signatureRow + 1, 1);
@@ -904,6 +1029,7 @@ export async function downloadValuesOnlyWorkbook(data, model, assets = []) {
     "INFORMATION",
     "AUTO GENERATED FEASIBILITY",
   ]);
+  dropEmptyConditionalFormatting(workbook);
   applySheetVisibility(workbook, visibleSheets);
 
   const buffer = await workbook.xlsx.writeBuffer();
@@ -1018,7 +1144,8 @@ export async function downloadRulesWorkbook(
       "AUTO GENERATED FEASIBILITY",
     ]);
 
-    applySheetVisibility(workbook, visibleSheets);
+    dropEmptyConditionalFormatting(workbook);
+  applySheetVisibility(workbook, visibleSheets);
 
     const outputBuffer = await workbook.xlsx.writeBuffer();
 
