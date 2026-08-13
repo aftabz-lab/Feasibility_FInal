@@ -417,7 +417,7 @@ function renderDataEntry() {
           ${textField("Other Income %", "information.otherIncomeRate", { type: "number", min: 0, max: 1, step: 0.0001 })}
           ${automaticField("Area Out of Dhaka (Y/N)", `${model.dhakaClassification} (${model.inputs.areaOutsideDhaka})`, "Controlled by Division")}
           ${textField("CEP Value Override", "information.cepValueOverride", { type: "number", min: 0, step: 1, optional: true, hint: `Blank = auto ৳ ${formatMoney(model.inputs.cepValue)}` })}
-          ${textField("Decoration Cost", "information.decorationCost", { type: "number", min: 0, step: 1 })}
+          ${textField("Decoration Cost", "information.decorationCostOverride", { type: "number", min: 0, step: 1, hint: `Blank = auto ৳ ${formatMoney(model.inputs.autoDecorationCost)} · ৳ 1,000/sft${String(state.data.project.pnp).trim().toUpperCase() === "Y" ? " + ৳ 20,00,000 (P&P)" : ""}, minimum ৳ 15,00,000` })}
           ${textField("Basket Size Override", "information.basketSizeOverride", { type: "number", min: 0, step: 0.01, optional: true, hint: `Blank = auto ${formatMoney(model.inputs.basketSize, 1)}` })}
           ${textField("Footfall Override", "information.footfallOverride", { type: "number", min: 0, step: 0.01, optional: true, hint: `Blank = sales ÷ basket` })}
         </div>`)}

@@ -192,6 +192,10 @@ function categoryMix(items) {
   return items.map(([name, value]) => ({ name, mix: number(value) / total }));
 }
 
+const DECORATION_COST_FLOOR = 1500000;
+const DECORATION_COST_PER_SFT = 1000;
+const DECORATION_COST_PNP_ADDITION = 2000000;
+
 export const defaultData = {
   meta: {
     sourceName: "Built-in feasibility baseline",
@@ -238,7 +242,7 @@ export const defaultData = {
   information: {
     otherIncomeRate: 0.03,
     cepValueOverride: null,
-    decorationCost: 1500000,
+    decorationCostOverride: null,
     basketSizeOverride: null,
     footfallOverride: null,
     areaOutsideDhaka: "N",
@@ -618,6 +622,16 @@ export function calculateModel(data) {
   const basketSize = optionalNumber(info.basketSizeOverride) ?? autoBasketSize;
   const dailyFootfall = optionalNumber(info.footfallOverride) ?? safeDivide(dailySales, basketSize);
   const cepValue = optionalNumber(info.cepValueOverride) ?? (yes(project.pnp) ? 430000 : 330000);
+  // Source workbook rule, INFORMATION!B19:
+  //   =MAX(1500000, IF(B14="N", B6*1000, B6*1000+2000000))
+  // i.e. Tk 1,000 per sft, plus Tk 2,000,000 when P&P is Y, with a Tk 1,500,000 floor.
+  const autoDecorationCost = Math.max(
+    DECORATION_COST_FLOOR,
+    number(project.sft) * DECORATION_COST_PER_SFT + (yes(project.pnp) ? DECORATION_COST_PNP_ADDITION : 0),
+  );
+  const decorationCostValue = optionalNumber(info.decorationCostOverride) ?? autoDecorationCost;
+  const decorationCostIsAuto = optionalNumber(info.decorationCostOverride) === null
+    || optionalNumber(info.decorationCostOverride) === undefined;
   const isFranchise = String(project.frOwn).toUpperCase() === "FR";
   const growth = [advanced.salesGrowthYear2, advanced.salesGrowthYear3, advanced.salesGrowthYear4, advanced.salesGrowthYear5];
 
@@ -710,9 +724,9 @@ export function calculateModel(data) {
   }
   const franchiseRent = isFranchise ? series(franchiseRentMonthly, franchiseRentMonthly, franchiseRentMonthly, ...franchiseRentYears) : series();
   const franchiseRentVat = multiply(franchiseRent, Array(8).fill(isFranchise ? number(advanced.rentVatRate) : 0));
-  const franchiseDepreciationMonthly = isFranchise ? safeDivide(info.decorationCost, advanced.franchiseDepreciationMonths) : 0;
+  const franchiseDepreciationMonthly = isFranchise ? safeDivide(decorationCostValue, advanced.franchiseDepreciationMonths) : 0;
   const franchiseDepreciation = annualMonthly(franchiseDepreciationMonthly, [0, 0, 0, 0]);
-  const franchiseFinancingMonthly = isFranchise ? safeDivide((number(info.decorationCost) + number(project.advance) + number(advanced.securityDeposit)) * number(advanced.franchiseFinanceRate), 12) : 0;
+  const franchiseFinancingMonthly = isFranchise ? safeDivide((decorationCostValue + number(project.advance) + number(advanced.securityDeposit)) * number(advanced.franchiseFinanceRate), 12) : 0;
   const franchiseFinancing = annualMonthly(franchiseFinancingMonthly, [0, 0, 0, 0]);
   const franchiseUtility = annualMonthly(
     isFranchise ? advanced.franchiseElectricityMonthly : 0,
@@ -736,10 +750,10 @@ export function calculateModel(data) {
   const franchisePbt = subtract(franchiseCommission, totalFranchiseExpenses);
   const totalProfit = add(franchisePbt, outletPLAfterOFC);
 
-  const decorationCost = series(info.decorationCost, 0, 0, info.decorationCost, 0, 0, 0, 0);
+  const decorationCost = series(decorationCostValue, 0, 0, decorationCostValue, 0, 0, 0, 0);
   const advance = series(project.advance, 0, 0, project.advance, 0, 0, 0, 0);
   const securityDeposit = series(advanced.securityDeposit, 0, 0, advanced.securityDeposit, 0, 0, 0, 0);
-  const initialInvestment = number(info.decorationCost) + number(project.advance) + number(advanced.securityDeposit);
+  const initialInvestment = decorationCostValue + number(project.advance) + number(advanced.securityDeposit);
   const yearlyCashFlow = [
     franchiseEbitda[3] - franchiseFinancing[3],
     franchiseEbitda[4] - franchiseFinancing[4],
@@ -879,6 +893,9 @@ export function calculateModel(data) {
       gpPercent,
       gpShare,
       cepValue,
+      decorationCost: decorationCostValue,
+      autoDecorationCost,
+      decorationCostIsAuto,
       initialInvestment,
       areaOutsideDhaka,
     },
@@ -991,7 +1008,21 @@ export function extractFromWorkbook(workbook, sourceName = "Imported workbook") 
   // This legacy worksheet cell can still be present in replacement workbooks,
   // but Division is now the single source of truth for the Dhaka classification.
   data.information.areaOutsideDhaka = getAreaOutsideDhakaForDivision(data.project.division);
-  data.information.decorationCost = pickNumber(get(informationSheet, "B19"), data.information.decorationCost);
+  // B19 normally holds the formula result, so importing it as a fixed number
+  // would freeze decoration cost at the imported workbook's SFT/P&P. Only keep it
+  // as a manual override when the sheet genuinely disagrees with the rule.
+  const importedDecoration = pickNumber(get(informationSheet, "B19"), null);
+  if (importedDecoration === null || importedDecoration === undefined) {
+    data.information.decorationCostOverride = null;
+  } else {
+    const ruleValue = Math.max(
+      DECORATION_COST_FLOOR,
+      number(data.project.sft) * DECORATION_COST_PER_SFT
+        + (yes(data.project.pnp) ? DECORATION_COST_PNP_ADDITION : 0),
+    );
+    data.information.decorationCostOverride =
+      Math.abs(Number(importedDecoration) - ruleValue) < 1 ? null : Number(importedDecoration);
+  }
   data.reference.autoGpPercent = pickNumber(get(informationSheet, "B10") ?? get(forecastSheet, "C23"), data.reference.autoGpPercent);
   data.reference.autoGpShareFr = pickNumber(get(informationSheet, "B7"), data.reference.autoGpShareFr);
   data.reference.autoBasketSize = pickNumber(get(informationSheet, "B11") ?? get(forecastSheet, "C30"), data.reference.autoBasketSize);
