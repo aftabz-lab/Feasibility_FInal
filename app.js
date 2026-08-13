@@ -1,4 +1,6 @@
 import {
+  applyAutoManpower,
+  manpowerBandLabel,
   calculateModel,
   cloneData,
   defaultData,
@@ -111,6 +113,9 @@ function asInputValue(element) {
 }
 
 function recalculate() {
+  // Headcount follows Sales Per Day from the Shwapno manpower matrix, unless the
+  // user has edited the table by hand (which switches it to manual).
+  applyAutoManpower(state.data);
   state.model = calculateModel(state.data);
 }
 
@@ -319,6 +324,11 @@ function sectionCard(title, helper, content, extraClass = "") {
 function renderDataEntry() {
   const { data, model } = state;
   const autoBadge = (isManual) => `<span class="override-badge ${isManual ? "manual" : "auto"}">${isManual ? "Manual override" : "Auto calculation"}</span>`;
+  const manpowerAuto = data.information?.manpowerAuto !== false;
+  const yesFlagLabel = String(data.project.pnp || "").trim().toUpperCase() === "Y" ? "P&P" : "Non-P&P";
+  const monthlySalesForBand = Number(data.project.monthlySalesOverride) > 0
+    ? Number(data.project.monthlySalesOverride)
+    : Number(data.project.projectedDailySales) * 30;
   const staffRows = data.staff.map((staff, index) => `<tr><td>${escapeHtml(staff.name)}</td><td><input data-path="staff.${index}.quantity" type="number" min="0" step="1" value="${escapeHtml(valueForInput(staff.quantity))}"></td><td><input data-path="staff.${index}.salary" type="number" min="0" step="1" value="${escapeHtml(valueForInput(staff.salary))}"></td><td>৳ ${formatMoney(Number(staff.quantity) * Number(staff.salary))}</td></tr>`).join("");
   const categoryRows = data.reference.categories.map((category, index) => `<tr><td><input data-path="reference.categories.${index}.name" type="text" value="${escapeHtml(valueForInput(category.name))}"></td><td><input data-path="reference.categories.${index}.mix" type="number" min="0" max="1" step="0.0001" value="${escapeHtml(valueForInput(category.mix))}"></td><td>${formatPercent(category.mix, 1)}</td></tr>`).join("");
   const signatory2 = model.signatories.find((person) => (
@@ -421,7 +431,10 @@ function renderDataEntry() {
           ${textField("Basket Size Override", "information.basketSizeOverride", { type: "number", min: 0, step: 0.01, optional: true, hint: `Blank = auto ${formatMoney(model.inputs.basketSize, 1)}` })}
           ${textField("Footfall Override", "information.footfallOverride", { type: "number", min: 0, step: 0.01, optional: true, hint: `Blank = sales ÷ basket` })}
         </div>`)}
-        ${sectionCard("Manpower allocation", "Edit quantity or salary; the Information and Feasibility sheets update together.", `<div class="table-scroll"><table class="input-table"><thead><tr><th>Position</th><th>Qty</th><th>Salary</th><th>Total</th></tr></thead><tbody>${staffRows}</tbody></table></div>`)}
+        ${sectionCard("Manpower allocation", manpowerAuto
+          ? "Headcount follows monthly sales using the Shwapno manpower matrix. Editing any quantity switches this table to manual."
+          : "Manual mode: headcount is no longer driven by sales. Tick the box to hand control back to the matrix.",
+          `<label class="inline-check"><input type="checkbox" data-action="manpower-auto"${manpowerAuto ? " checked" : ""}> Auto headcount from monthly sales${manpowerAuto ? ` &middot; ${yesFlagLabel} &middot; ${escapeHtml(manpowerBandLabel(monthlySalesForBand, state.data.project.pnp))}` : ""}</label><div class="table-scroll"><table class="input-table"><thead><tr><th>Position</th><th>Qty</th><th>Salary</th><th>Total</th></tr></thead><tbody>${staffRows}</tbody></table></div>`)}
         ${sectionCard("Auto feasibility assumptions", "Editable financial drivers used by the output report.", `<details open><summary>Growth, stock and margin</summary><div class="field-grid three">
           ${textField("Stock / SFT", "advanced.stockPerSft", { type: "number", min: 0, step: 1 })}
           ${textField("GP annual step", "advanced.gpAnnualStep", { type: "number", min: 0, max: 1, step: 0.0001 })}
@@ -602,6 +615,10 @@ function applyChange(target) {
     return;
   }
   setPath(state.data, path, selectedValue);
+  if (/^staff\.\d+\.quantity$/.test(path)) {
+    // A hand-typed headcount wins over the matrix from here on.
+    state.data.information.manpowerAuto = false;
+  }
   if (path === "project.division") {
     state.data.project.district = "";
   }
@@ -721,6 +738,7 @@ async function handleSignatureFile(file) {
 }
 
 async function downloadExport() {
+  recalculate();
   try {
     setStatus("loading", "Creating values-only Excel with selected signatures…");
     await downloadValuesOnlyWorkbook(state.data, state.model, state.signatureAssets);
@@ -732,6 +750,10 @@ async function downloadExport() {
 }
 
 async function downloadRulesExport() {
+  // A number field only fires "change" on blur, and clicking a toolbar button can
+  // re-render the page mid-click, so the last edit could miss its recalculate().
+  // Recomputing here guarantees the exported figures match what is on screen.
+  recalculate();
   try {
     setStatus("loading", "Choose the folder and filename for the Excel with rules…");
     const result = await downloadRulesWorkbook(
@@ -764,6 +786,10 @@ async function downloadRulesExport() {
 }
 
 async function downloadPdfExport() {
+  // A number field only fires "change" on blur, and clicking a toolbar button can
+  // re-render the page mid-click, so the last edit could miss its recalculate().
+  // Recomputing here guarantees the exported figures match what is on screen.
+  recalculate();
   try {
     setStatus("loading", "Creating the three-page PDF…");
     await downloadFeasibilityPdf(state.data, state.model, state.signatureAssets);
@@ -789,6 +815,18 @@ app.addEventListener("click", (event) => {
   if (actionName === "download-xlsx") downloadExport();
   if (actionName === "download-rules-xlsx") downloadRulesExport();
   if (actionName === "download-pdf") downloadPdfExport();
+  if (actionName === "manpower-auto") {
+    const enabled = state.data.information.manpowerAuto === false;
+    state.data.information.manpowerAuto = enabled;
+    recalculate();
+    state.status = {
+      kind: "ready",
+      message: enabled
+        ? "Headcount is now derived from monthly sales."
+        : "Manpower table switched to manual entry.",
+    };
+    render();
+  }
   if (actionName === "reset") {
     state.data = cloneData(defaultData);
     recalculate();

@@ -233,6 +233,110 @@ export function lookupElectricityMonthly(sft, pnp, table) {
   return Math.round(yes(pnp) ? band.Y : band.N);
 }
 
+// ---------------------------------------------------------------------------
+// Shwapno outlet manpower matrix (MANPOWER sheet).
+//
+// Headcount is banded on MONTHLY sales in Lac, with separate tables for P&P and
+// Non-P&P outlets. Each row is [upper bound in Lac, then headcount per position
+// in POSITION order]. The bands are already ranges in the source sheet, so the
+// lookup is a step - no interpolation, no fractional people. Sales below the
+// first band or above the last clamp to that end.
+// ---------------------------------------------------------------------------
+
+const MANPOWER_POSITIONS = [
+  "om", "icmo", "duty", "cg", "commodity", "protein", "perishables",
+  "gml", "pos", "porter", "bsm", "bkstr", "security", "cleaner",
+];
+
+const LAC = 100000;
+
+const MANPOWER_NON_PNP = [
+  [15, 1, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
+  [18, 1, 0, 1, 2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
+  [21, 1, 0, 1, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0],
+  [24, 1, 0, 1, 4, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0],
+  [27, 1, 0, 1, 5, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0],
+  [30, 1, 0, 1, 4, 1, 0, 0, 0, 2, 0, 0, 1, 0, 0],
+  [33, 1, 0, 1, 4, 1, 0, 0, 0, 2, 0, 1, 2, 0, 0],
+  [36, 1, 0, 1, 5, 1, 0, 0, 0, 2, 0, 1, 2, 0, 0],
+  [39, 1, 0, 1, 5, 1, 0, 0, 0, 2, 0, 1, 3, 0, 0],
+  [42, 1, 0, 1, 6, 1, 0, 0, 0, 2, 0, 1, 3, 0, 0],
+  [45, 1, 0, 1, 6, 2, 0, 0, 0, 2, 0, 1, 3, 0, 0],
+  [48, 1, 0, 1, 7, 2, 0, 0, 0, 2, 0, 1, 3, 0, 0],
+  [51, 1, 0, 1, 7, 2, 0, 0, 0, 2, 0, 1, 4, 0, 0],
+];
+
+const MANPOWER_PNP = [
+  [27, 1, 1, 0, 2, 0, 4, 0, 0, 2, 0, 0, 2, 1, 2],
+  [30, 1, 1, 0, 4, 0, 4, 0, 0, 2, 0, 0, 2, 1, 2],
+  [33, 1, 1, 0, 5, 0, 4, 0, 0, 2, 0, 0, 2, 1, 2],
+  [36, 1, 1, 0, 4, 1, 4, 0, 0, 2, 0, 0, 2, 1, 2],
+  [39, 1, 1, 0, 4, 1, 4, 0, 0, 3, 0, 1, 2, 1, 2],
+  [42, 1, 1, 0, 5, 1, 4, 0, 0, 3, 0, 1, 2, 1, 2],
+  [45, 1, 1, 0, 5, 1, 4, 0, 0, 3, 0, 1, 3, 1, 2],
+  [48, 1, 1, 0, 6, 1, 4, 0, 0, 3, 0, 1, 3, 1, 2],
+  [51, 1, 1, 0, 6, 2, 4, 0, 0, 3, 0, 1, 3, 1, 2],
+  [54, 1, 1, 0, 7, 2, 4, 0, 0, 3, 0, 1, 3, 1, 2],
+  [57, 1, 1, 0, 7, 2, 4, 0, 0, 3, 0, 1, 4, 1, 2],
+  [60, 1, 1, 0, 7, 2, 4, 0, 0, 3, 0, 1, 4, 2, 4],
+  [63, 1, 1, 0, 7, 2, 4, 0, 0, 3, 0, 1, 4, 2, 4],
+  [66, 1, 1, 0, 7, 2, 4, 0, 0, 3, 0, 1, 4, 2, 4],
+  [69, 1, 1, 0, 7, 2, 5, 0, 0, 4, 0, 1, 4, 2, 4],
+  [72, 1, 1, 0, 7, 3, 5, 0, 0, 4, 0, 1, 4, 2, 4],
+  [75, 1, 1, 0, 7, 3, 5, 0, 0, 4, 0, 1, 4, 2, 4],
+  [78, 1, 1, 0, 7, 3, 5, 0, 0, 4, 0, 1, 4, 2, 5],
+  [81, 1, 1, 0, 8, 3, 5, 0, 0, 5, 0, 1, 4, 2, 5],
+  [84, 1, 1, 0, 8, 3, 5, 0, 0, 5, 0, 1, 4, 2, 5],
+  [87, 1, 1, 0, 8, 3, 5, 0, 0, 5, 0, 1, 4, 2, 5],
+  [90, 1, 1, 0, 8, 3, 5, 0, 0, 5, 0, 1, 4, 2, 5],
+  [93, 1, 1, 0, 8, 3, 5, 0, 0, 5, 0, 1, 4, 2, 5],
+  [96, 1, 1, 0, 8, 3, 5, 0, 0, 5, 0, 1, 4, 2, 5],
+  [99, 1, 1, 0, 8, 3, 5, 0, 0, 5, 0, 1, 4, 2, 5],
+];
+
+export function manpowerBandLabel(monthlySales, pnp) {
+  const series = yes(pnp) ? MANPOWER_PNP : MANPOWER_NON_PNP;
+  const lac = (Number(monthlySales) || 0) / LAC;
+  const first = series[0][0];
+  const last = series[series.length - 1][0];
+  if (lac < first) return yes(pnp) ? `Below ${first} Lac` : `Below ${first} Lac`;
+  if (lac > last) return `Above ${last} Lac`;
+  for (let index = 0; index < series.length; index += 1) {
+    if (lac <= series[index][0]) {
+      const lower = index === 0 ? 0 : series[index - 1][0] + 1;
+      return index === 0 ? `Below ${series[0][0]} Lac` : `${lower} - ${series[index][0]} Lac`;
+    }
+  }
+  return `Above ${last} Lac`;
+}
+
+// Returns { om: n, icmo: n, ... } for a monthly sales figure.
+export function manpowerForMonthlySales(monthlySales, pnp) {
+  const series = yes(pnp) ? MANPOWER_PNP : MANPOWER_NON_PNP;
+  const lac = (Number(monthlySales) || 0) / LAC;
+  let row = series[series.length - 1];
+  for (let index = 0; index < series.length; index += 1) {
+    if (lac <= series[index][0]) { row = series[index]; break; }
+  }
+  const result = {};
+  MANPOWER_POSITIONS.forEach((id, position) => { result[id] = row[position + 1]; });
+  return result;
+}
+
+// Writes the matrix headcount onto data.staff. Salaries are untouched - only
+// quantities follow sales. Skipped once the user takes manual control.
+export function applyAutoManpower(data) {
+  if (!data || data.information?.manpowerAuto === false) return data;
+  const monthly = optionalNumber(data.project?.monthlySalesOverride)
+    ?? number(data.project?.projectedDailySales) * 30;
+  if (!(monthly > 0)) return data;
+  const target = manpowerForMonthlySales(monthly, data.project?.pnp);
+  (data.staff || []).forEach((item) => {
+    if (Object.prototype.hasOwnProperty.call(target, item.id)) item.quantity = target[item.id];
+  });
+  return data;
+}
+
 const DECORATION_COST_FLOOR = 1500000;
 const DECORATION_COST_PER_SFT = 1000;
 const DECORATION_COST_PNP_ADDITION = 2000000;
@@ -281,6 +385,7 @@ export const defaultData = {
     hotelRestaurantHospitalCount: 0,
   },
   information: {
+    manpowerAuto: true,
     otherIncomeRate: 0.03,
     cepValueOverride: null,
     decorationCostOverride: null,

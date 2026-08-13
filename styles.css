@@ -181,3 +181,6 @@ details { margin-top: 7px; border: 1px solid #315069; border-radius: 9px; backgr
 @media print {
   .sticky-command-header { position: static; box-shadow: none; }
 }
+
+.inline-check { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; color: var(--muted); font-size: 0.78rem; font-weight: 600; }
+.inline-check input { width: 15px; height: 15px; accent-color: var(--accent); }
