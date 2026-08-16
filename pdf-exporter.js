@@ -575,3 +575,47 @@ export async function downloadFeasibilityPdf(data, model, assets = []) {
   const doc = await buildFeasibilityPdf(data, model, assets);
   doc.save(`${safeName(data.project.locationArea)}_feasibility_report.pdf`);
 }
+
+// Hands the PDF to whatever the device already has installed - WhatsApp, Outlook,
+// Teams, Drive and so on - through the operating system's own share sheet.
+//
+// Only the Web Share API can pass a real FILE to another app. A mailto: or wa.me
+// link can pre-fill text but cannot carry an attachment, so where Web Share is
+// missing (most desktop browsers) the PDF is saved first and the mail client is
+// opened with the message ready, leaving just the attach step to the user.
+export async function shareFeasibilityPdf(data, model, assets = []) {
+  const doc = await buildFeasibilityPdf(data, model, assets);
+  const location = data?.project?.locationArea || "this location";
+  const fileName = `${safeName(data.project.locationArea)}_feasibility_report.pdf`;
+  const subject = `Feasibility report - ${location}`;
+  const body = `Please find the feasibility report for ${location} attached.`;
+
+  const blob = doc.output("blob");
+  const canUseShare = typeof navigator !== "undefined"
+    && typeof navigator.share === "function"
+    && typeof File === "function";
+
+  if (canUseShare) {
+    const file = new File([blob], fileName, { type: "application/pdf" });
+    if (typeof navigator.canShare !== "function" || navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file], title: subject, text: body });
+        return { method: "share-sheet", fileName };
+      } catch (error) {
+        // The user dismissing the sheet is not a failure worth reporting.
+        if (error?.name === "AbortError") return { method: "cancelled", fileName };
+      }
+    }
+  }
+
+  doc.save(fileName);
+  return { method: "download", fileName, subject, body };
+}
+
+export function mailtoLink(subject, body) {
+  return `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+
+export function whatsappLink(text) {
+  return `https://wa.me/?text=${encodeURIComponent(text)}`;
+}

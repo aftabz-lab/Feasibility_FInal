@@ -15,7 +15,7 @@ import {
   salesGivenByOptions,
 } from "./model.mjs";
 import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js";
-import { downloadFeasibilityPdf } from "./pdf-exporter.js";
+import { downloadFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js";
 
 const app = document.querySelector("#app");
 const workbookInput = document.querySelector("#workbook-file");
@@ -120,7 +120,13 @@ function recalculate() {
 }
 
 function statusHtml() {
-  return `<div class="status status-${escapeHtml(state.status.kind)}"><span class="status-dot"></span>${escapeHtml(state.status.message)}</div>`;
+  // After a desktop share falls back to a download, offer the two send routes
+  // directly in the status bar so the file is one click from being mailed.
+  const fallback = state.shareFallback;
+  const shareLinks = fallback
+    ? `<a class="status-link" href="${escapeHtml(mailtoLink(fallback.subject, fallback.body))}">Open Outlook</a><a class="status-link" href="${escapeHtml(whatsappLink(`${fallback.subject}. ${fallback.body}`))}" target="_blank" rel="noopener">Open WhatsApp</a>`
+    : "";
+  return `<div class="status status-${escapeHtml(state.status.kind)}"><span class="status-dot"></span>${escapeHtml(state.status.message)}${shareLinks}</div>`;
 }
 
 function navHtml() {
@@ -143,7 +149,7 @@ function headerHtml() {
           <div class="mode-chip">${escapeHtml(mode)}</div>
           <button class="btn btn-secondary" type="button" data-action="upload-workbook">Load Excel</button>
           <button class="btn btn-primary" type="button" data-action="download-rules-xlsx">Download Excel with Rules</button>
-          <button class="btn btn-pdf" type="button" data-action="download-pdf">Download 3-page PDF</button>
+          <button class="btn btn-pdf" type="button" data-action="download-pdf">Download 3-page PDF</button><button class="btn btn-secondary" type="button" data-action="share-pdf">Share PDF</button>
         </div>
       </header>
       <nav class="navigation" aria-label="Dashboard sections">${navHtml()}</nav>
@@ -545,7 +551,7 @@ function renderFeasibility() {
   const alert = model.alerts?.franchisePbtAboveOutletPlYear1
     ? `<div class="feasibility-alert"><strong>Review required:</strong> Year-1 Franchisee PBT is higher than Year-1 P/L considering Outbound Transport. Both cells are marked red.</div>`
     : "";
-  return `<section class="page feasibility-page"><div class="page-title-row"><div><p class="eyebrow">AUTO GENERATED FEASIBILITY</p><h2>Five-year feasibility statement</h2><p class="page-subtitle">Green cells are positive conditional results; a negative conditional value turns red automatically.</p></div><div class="button-group"><button class="btn btn-secondary" type="button" data-view="entry">Modify assumptions</button><button class="btn btn-primary" type="button" data-action="download-rules-xlsx">Download Excel with Rules</button><button class="btn btn-pdf" type="button" data-action="download-pdf">Download 3-page PDF</button></div></div>
+  return `<section class="page feasibility-page"><div class="page-title-row"><div><p class="eyebrow">AUTO GENERATED FEASIBILITY</p><h2>Five-year feasibility statement</h2><p class="page-subtitle">Green cells are positive conditional results; a negative conditional value turns red automatically.</p></div><div class="button-group"><button class="btn btn-secondary" type="button" data-view="entry">Modify assumptions</button><button class="btn btn-primary" type="button" data-action="download-rules-xlsx">Download Excel with Rules</button><button class="btn btn-pdf" type="button" data-action="download-pdf">Download 3-page PDF</button><button class="btn btn-secondary" type="button" data-action="share-pdf">Share PDF</button></div></div>
     ${alert}
     <article class="panel report-panel"><div class="report-heading"><strong>${escapeHtml(data.project.locationArea)}</strong><span>Prepared ${new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "2-digit" })}</span></div><div class="table-scroll feasibility-table"><table class="report-table"><thead><tr><th></th><th>Number / %</th><th>1st Month</th><th>2nd Month</th><th>3rd Month</th><th></th><th>1st Year</th><th>2nd Year</th><th>3rd Year</th><th>4th Year</th><th>5th Year</th><th>Total</th></tr></thead><tbody>${reportRows}</tbody></table></div></article>
     <div class="return-grid"><article class="panel"><div class="panel-heading"><div><p class="eyebrow">Cash flow</p><h3>Return profile</h3></div></div><div class="table-scroll"><table class="report-table compact"><thead><tr><th></th><th>Y1</th><th>Y2</th><th>Y3</th><th>Y4</th><th>Y5</th></tr></thead><tbody><tr><th>Net Cash Flow / Year</th>${model.metrics.yearlyCashFlow.map((value) => `<td class="${value < 0 ? "conditional-cell conditional-negative" : ""}">৳ ${formatMoney(value)}</td>`).join("")}</tr><tr><th>Cumulative Cash Flow</th>${model.metrics.cumulativeCashFlow.map((value) => `<td class="${value < 0 ? "conditional-cell conditional-negative" : ""}">৳ ${formatMoney(value)}</td>`).join("")}</tr><tr><th>ROI Cash Flow</th>${model.metrics.yearlyCashFlow.map((value) => `<td class="conditional-cell ${value < 0 ? "conditional-negative" : "conditional-positive"}">${formatPercent(value / model.inputs.initialInvestment, 1)}</td>`).join("")}</tr></tbody></table></div></article><article class="panel metric-panel"><div class="panel-heading"><div><p class="eyebrow">Return metrics</p><h3>Decision support</h3></div></div><div class="return-metrics"><div><span>Discount Rate</span><strong>${formatPercent(model.metrics.discountRate, 1)}</strong></div><div><span>NPV</span><strong class="${model.metrics.npv < 0 ? "value-negative" : ""}">৳ ${formatMoney(model.metrics.npv)}</strong></div><div><span>NPV Return</span><strong class="${model.metrics.roi < 0 ? "value-negative" : ""}">${formatPercent(model.metrics.roi, 1)}</strong></div><div><span>IRR</span><strong class="${model.metrics.irr !== null && model.metrics.irr < 0 ? "value-negative" : ""}">${model.metrics.irr === null ? "N/A" : formatPercent(model.metrics.irr, 2)}</strong></div><div><span>Payback</span><strong>${model.metrics.payback === null ? "Not reached" : `${model.metrics.payback.toFixed(1)} years`}</strong></div></div></article></div>
@@ -571,6 +577,7 @@ function render() {
 }
 
 function setStatus(kind, message) {
+  if (kind === "loading") state.shareFallback = null;
   state.status = { kind, message };
   render();
 }
@@ -793,6 +800,30 @@ async function downloadRulesExport() {
   render();
 }
 
+async function sharePdfExport() {
+  recalculate();
+  try {
+    setStatus("loading", "Preparing the PDF to share…");
+    const result = await shareFeasibilityPdf(state.data, state.model, state.signatureAssets);
+    if (result.method === "share-sheet") {
+      state.status = { kind: "ready", message: "PDF handed to your device's share sheet." };
+    } else if (result.method === "cancelled") {
+      state.status = { kind: "ready", message: "Sharing was cancelled." };
+    } else {
+      // Desktop browsers cannot attach a file to another app, so the PDF is saved
+      // and the mail client is opened with the message already written.
+      state.shareFallback = { subject: result.subject, body: result.body, fileName: result.fileName };
+      state.status = {
+        kind: "ready",
+        message: `${result.fileName} saved. Use the Outlook or WhatsApp button to send it, then attach the saved file.`,
+      };
+    }
+  } catch (error) {
+    state.status = { kind: "error", message: `Could not share the PDF: ${error.message}` };
+  }
+  render();
+}
+
 async function downloadPdfExport() {
   // A number field only fires "change" on blur, and clicking a toolbar button can
   // re-render the page mid-click, so the last edit could miss its recalculate().
@@ -823,6 +854,7 @@ app.addEventListener("click", (event) => {
   if (actionName === "download-xlsx") downloadExport();
   if (actionName === "download-rules-xlsx") downloadRulesExport();
   if (actionName === "download-pdf") downloadPdfExport();
+  if (actionName === "share-pdf") sharePdfExport();
   if (actionName === "manpower-auto") {
     const enabled = state.data.information.manpowerAuto === false;
     state.data.information.manpowerAuto = enabled;
