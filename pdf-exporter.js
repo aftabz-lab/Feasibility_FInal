@@ -172,8 +172,9 @@ async function drawPageReviewSignature(doc, model, assets, position = {}) {
   const margin = 26;
   // Signatures are drawn at twice their previous size; pages 1 and 2 have ample
   // room below the final table, so this stays inside the same single page.
-  const imageWidth = 156;
-  const imageHeight = 84;
+  // Scaled down twice from the original 156 x 84: -30%, then a further -20%.
+  const imageWidth = 87;
+  const imageHeight = 47;
   // Pages 1 and 2 pass the lower edge of their final table so this mark stays
   // on the left immediately below the content, rather than floating at the
   // lower-right of the page.
@@ -505,14 +506,15 @@ async function drawSignatureBlocks(doc, y, model, assets, options = {}) {
       const lineY = top + 58;
       const dataUrl = person.includeInPdf === true ? await imageDataUrl(assetById.get(person.signatureId)) : null;
       if (dataUrl) {
-        const imageWidth = Math.min(172, lineWidth);
-        const imageHeight = 66;
+        // Scaled down twice from the original 172 x 66: -30%, then a further -20%.
+        const imageWidth = Math.min(96, lineWidth);
+        const imageHeight = 37;
         const format = /image\/jpe?g/i.test(dataUrl) ? "JPEG" : "PNG";
         try {
           // Place the ink directly across the signing baseline. The dotted line is
           // intentionally drawn afterwards: many supplied signature PNGs include
           // an opaque white background, which would otherwise hide the line.
-          doc.addImage(dataUrl, format, lineX + (lineWidth - imageWidth) / 2, lineY - 52, imageWidth, imageHeight, undefined, "FAST");
+          doc.addImage(dataUrl, format, lineX + (lineWidth - imageWidth) / 2, lineY - 29, imageWidth, imageHeight, undefined, "FAST");
         } catch {
           // An unsupported upload should never stop the PDF export. The dashed line remains usable for a handwritten signature.
         }
