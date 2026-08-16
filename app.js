@@ -268,7 +268,7 @@ function textField(label, path, options = {}) {
   const type = options.type ?? "text";
   const optional = options.optional ? "data-optional=\"true\"" : "";
   const percentPoints = options.percentPoints ? "data-percent-points=\"true\"" : "";
-  const attributes = [options.min !== undefined ? `min="${options.min}"` : "", options.max !== undefined ? `max="${options.max}"` : "", options.step !== undefined ? `step="${options.step}"` : "", options.readOnly ? "readonly" : ""].filter(Boolean).join(" ");
+  const attributes = [options.min !== undefined ? `min="${options.min}"` : "", options.max !== undefined ? `max="${options.max}"` : "", options.step !== undefined ? `step="${options.step}"` : "", options.readOnly ? "readonly" : "", options.placeholder ? `placeholder="${escapeHtml(options.placeholder)}"` : ""].filter(Boolean).join(" ");
   const inputValue = options.percentPoints ? percentPointsForInput(value) : valueForInput(value);
   return `<label class="field"><span>${escapeHtml(label)}${options.hint ? `<em>${escapeHtml(options.hint)}</em>` : ""}</span><input ${optional} ${percentPoints} data-path="${escapeHtml(path)}" type="${type}" value="${escapeHtml(inputValue)}" ${attributes}></label>`;
 }
@@ -285,7 +285,8 @@ function selectField(label, path, values, options = {}) {
   const displayValue = selected === undefined ? valueForInput(value) : valueForInput(labelFn(selected));
   const listId = searchListId(path);
   const emptyOption = '<option value="" data-value=""></option>';
-  return `<label class="field"><span>${escapeHtml(label)}${options.hint ? `<em>${escapeHtml(options.hint)}</em>` : ""}</span><input class="searchable-select" data-path="${escapeHtml(path)}" data-searchable-select="true" type="search" list="${listId}" autocomplete="off" value="${escapeHtml(displayValue)}" placeholder="${escapeHtml(options.placeholder ?? "Search or select")}" aria-label="Search ${escapeHtml(label)}" aria-autocomplete="list"><datalist id="${listId}">${emptyOption}${searchableOptionsHtml(values, labelFn, valueFn)}</datalist></label>`;
+  const freeText = options.freeText === true ? ' data-free-text="true"' : "";
+  return `<label class="field"><span>${escapeHtml(label)}${options.hint ? `<em>${escapeHtml(options.hint)}</em>` : ""}</span><input class="searchable-select" data-path="${escapeHtml(path)}" data-searchable-select="true"${freeText} type="search" list="${listId}" autocomplete="off" value="${escapeHtml(displayValue)}" placeholder="${escapeHtml(options.placeholder ?? "Search or select")}" aria-label="Search ${escapeHtml(label)}" aria-autocomplete="list"><datalist id="${listId}">${emptyOption}${searchableOptionsHtml(values, labelFn, valueFn)}</datalist></label>`;
 }
 
 function districtDivisionKey({ district, division }) {
@@ -403,10 +404,10 @@ function renderDataEntry() {
           <div class="override-box"><div><span>GP%</span>${autoBadge(model.modes.gpPercent === "Manual")}</div>${textField("Manual GP%", "project.gpPercentOverride", { type: "number", min: 0, max: 100, step: 0.01, optional: true, percentPoints: true, hint: `Auto: ${formatPercent(model.inputs.gpPercent, 2)} · Enter 16 or 0.16 for 16%` })}<button class="text-button" type="button" data-action="clear-override" data-path="project.gpPercentOverride">Use automatic GP%</button></div>
           <div class="override-box"><div><span>GP Share</span>${autoBadge(model.modes.gpShare === "Manual")}</div>${textField("Manual GP Share", "project.gpShareOverride", { type: "number", min: 0, max: 100, step: 0.01, optional: true, percentPoints: true, hint: `Auto: ${formatPercent(model.inputs.gpShare, 1)} · Enter 16 or 0.16 for 16%` })}<button class="text-button" type="button" data-action="clear-override" data-path="project.gpShareOverride">Use automatic GP Share</button></div>
         </div>`)}
-        ${sectionCard("Sales Given By & Opened By", "Select a name only. Signatories 2 and 3 update automatically; use the Signature manager only when you need a manual override.", `<div class="field-grid two">
-          ${selectField("Sales Given By", "project.salesGivenBy", salesGivenByOptions)}
-          ${selectField("Opened by", "project.openedBy", openedByOptions, { labelFn: (item) => item.name, valueFn: (item) => item.name })}
-          ${textField("Opened by Designation", "project.openedDesignation", { readOnly: true })}
+        ${sectionCard("Sales Given By & Opened By", "Pick a name from the list, or just type one that is not there. A recognised name fills its designation automatically; otherwise type the designation yourself.", `<div class="field-grid two">
+          ${selectField("Sales Given By", "project.salesGivenBy", salesGivenByOptions, { freeText: true, placeholder: "Search or type a name" })}
+          ${selectField("Opened by", "project.openedBy", openedByOptions, { labelFn: (item) => item.name, valueFn: (item) => item.name, freeText: true, placeholder: "Search or type a name" })}
+          ${textField("Opened by Designation", "project.openedDesignation", { placeholder: "Type the designation" })}
         </div>`)}
         ${sectionCard("Sales forecasting assessment", "The score, weightage and forecast classification update automatically.", `<div class="field-grid two">
           ${selectField("Market / Bazar position", "forecast.marketNearby", ["Within Bazar", "Near Bazar"])}
@@ -606,9 +607,13 @@ function applyDistrictSelection(target) {
 function applyChange(target) {
   const path = target.dataset.path;
   if (!path || target.readOnly) return;
-  const selectedValue = target.dataset.searchableSelect === "true"
-    ? searchableChoiceValue(target)
-    : asInputValue(target);
+  const isSearchable = target.dataset.searchableSelect === "true";
+  let selectedValue = isSearchable ? searchableChoiceValue(target) : asInputValue(target);
+  // Fields marked data-free-text accept a name that is not in the list, so a new
+  // person can be typed in without being added to the source workbook first.
+  if (selectedValue === undefined && isSearchable && target.dataset.freeText === "true") {
+    selectedValue = String(target.value || "").trim();
+  }
   if (selectedValue === undefined) {
     state.status = { kind: "warning", message: "Choose a value from the matching suggestions." };
     render();
@@ -623,7 +628,10 @@ function applyChange(target) {
     state.data.project.district = "";
   }
   if (path === "project.openedBy") {
-    state.data.project.openedDesignation = getOpenedDesignation(state.data.project.openedBy);
+    // A known name still fills its designation automatically; an unrecognised one
+    // leaves the field untouched so it can be typed by hand.
+    const knownDesignation = getOpenedDesignation(state.data.project.openedBy);
+    if (knownDesignation) state.data.project.openedDesignation = knownDesignation;
   }
   recalculate();
   const signatory3Index = state.data.signatories.findIndex((person) => (
