@@ -650,6 +650,36 @@ function dropEmptyConditionalFormatting(workbook) {
   });
 }
 
+// Every sheet in an exported workbook is protected with this password, so the
+// figures cannot be altered by accident once the file leaves the app. Excel sheet
+// protection is a tamper guard, not encryption - the file contents stay readable.
+const SHEET_PROTECTION_PASSWORD = "9";
+
+async function protectAllSheets(workbook) {
+  for (const sheet of workbook.worksheets) {
+    try {
+      await sheet.protect(SHEET_PROTECTION_PASSWORD, {
+        // Reading, selecting and copying stay available; structural edits do not.
+        selectLockedCells: true,
+        selectUnlockedCells: true,
+        formatCells: false,
+        formatColumns: false,
+        formatRows: false,
+        insertRows: false,
+        insertColumns: false,
+        insertHyperlinks: false,
+        deleteRows: false,
+        deleteColumns: false,
+        sort: false,
+        autoFilter: false,
+        pivotTables: false,
+      });
+    } catch (error) {
+      // A sheet that refuses protection must not abort the whole export.
+    }
+  }
+}
+
 function applySheetVisibility(workbook, visibleSheets) {
   workbook.eachSheet((sheet) => {
     if (visibleSheets.has(sheet.name)) {
@@ -1322,6 +1352,7 @@ export async function downloadValuesOnlyWorkbook(data, model, assets = []) {
   ]);
   dropEmptyConditionalFormatting(workbook);
   applySheetVisibility(workbook, visibleSheets);
+  await protectAllSheets(workbook);
 
   const buffer = await workbook.xlsx.writeBuffer();
   const blob = new Blob([buffer], { type: XLSX_MIME });
@@ -1438,7 +1469,8 @@ export async function downloadRulesWorkbook(
     ]);
 
     dropEmptyConditionalFormatting(workbook);
-  applySheetVisibility(workbook, visibleSheets);
+    applySheetVisibility(workbook, visibleSheets);
+    await protectAllSheets(workbook);
 
     const outputBuffer = await workbook.xlsx.writeBuffer();
 
