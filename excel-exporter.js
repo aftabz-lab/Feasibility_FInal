@@ -1455,8 +1455,9 @@ export async function downloadRulesWorkbook(
       }
     );
 
-    const fileName =
-      `${safeFileName(data?.project?.locationArea, "Feasibility")}_with_rules.xlsx`;
+    // Suggested filename is just the location - no "_with_rules" suffix. The Save
+    // dialog lets the user type whatever they want over it.
+    const fileName = `${safeFileName(data?.project?.locationArea, "Feasibility")}.xlsx`;
 
     const saved = await saveBlobToChosenFolder(blob, fileName);
 
