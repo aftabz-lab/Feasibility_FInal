@@ -659,6 +659,8 @@ async function protectAllSheets(workbook) {
   for (const sheet of workbook.worksheets) {
     try {
       await sheet.protect(SHEET_PROTECTION_PASSWORD, {
+        // Excel's default of 100,000 spins costs ~17s across these 14 sheets.
+        spinCount: 10000,
         // Reading, selecting and copying stay available; structural edits do not.
         selectLockedCells: true,
         selectUnlockedCells: true,
@@ -1370,21 +1372,29 @@ export async function downloadValuesOnlyWorkbook(data, model, assets = []) {
 // straight into a chosen PC folder under a chosen filename. Firefox/Safari have
 // no such API, and the picker also throws when the page is not in a secure or
 // user-activated context - both cases fall back to a normal download.
-async function saveBlobToChosenFolder(blob, suggestedName) {
+// showSaveFilePicker needs TRANSIENT USER ACTIVATION - it only works within a few
+// seconds of the click. Building the workbook takes far longer than that, so the
+// handle is claimed up front, before any of the heavy work starts. Doing it
+// afterwards makes the browser reject the call and the export silently falls back
+// to an ordinary download - which is exactly how the "save to folder" option
+// disappeared once sheet protection was added.
+async function requestSaveTarget(suggestedName) {
   const picker = globalThis.window?.showSaveFilePicker;
-  if (typeof picker === "function") {
-    let handle = null;
+  if (typeof picker !== "function") return null;
+  try {
+    return await picker.call(globalThis.window, {
+      suggestedName,
+      types: [{ description: "Excel Workbook", accept: { [XLSX_MIME]: [".xlsx"] } }],
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;   // the user pressed Cancel
+    return null;                                      // picker unavailable here
+  }
+}
+
+async function writeToSaveTarget(handle, blob, suggestedName) {
+  if (handle) {
     try {
-      handle = await picker.call(globalThis.window, {
-        suggestedName,
-        types: [{ description: "Excel Workbook", accept: { [XLSX_MIME]: [".xlsx"] } }],
-      });
-    } catch (error) {
-      // The user pressed Cancel - surface that instead of silently downloading.
-      if (error?.name === "AbortError") throw error;
-      handle = null;
-    }
-    if (handle) {
       const writable = await handle.createWritable();
       try {
         await writable.write(blob);
@@ -1392,6 +1402,8 @@ async function saveBlobToChosenFolder(blob, suggestedName) {
         await writable.close();
       }
       return { method: "save-picker", fileName: handle.name || suggestedName };
+    } catch (error) {
+      // Writing failed (permission withdrawn, disk error) - still give them the file.
     }
   }
   downloadBlob(blob, suggestedName);
@@ -1433,6 +1445,10 @@ export async function downloadRulesWorkbook(
   sourceBuffer = null,
   sourceName = "source-workbook.xlsx",
 ) {
+  const fileName = `${safeFileName(data?.project?.locationArea, "Feasibility")}.xlsx`;
+  // Claimed first, while the click still counts as user activation.
+  const saveTarget = await requestSaveTarget(fileName);
+
   try {
     if (!globalThis.ExcelJS) {
       throw new Error("ExcelJS is not loaded.");
@@ -1487,11 +1503,7 @@ export async function downloadRulesWorkbook(
       }
     );
 
-    // Suggested filename is just the location - no "_with_rules" suffix. The Save
-    // dialog lets the user type whatever they want over it.
-    const fileName = `${safeFileName(data?.project?.locationArea, "Feasibility")}.xlsx`;
-
-    const saved = await saveBlobToChosenFolder(blob, fileName);
+    const saved = await writeToSaveTarget(saveTarget, blob, fileName);
 
     return {
       method: saved.method,
