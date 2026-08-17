@@ -195,7 +195,7 @@ async function drawPageReviewSignature(doc, model, assets, position = {}) {
 
 async function drawForecastPage(doc, data, model, assets) {
   const pageWidth = doc.internal.pageSize.getWidth();
-  let y = drawPageHeader(doc, "SALES FORECASTING TOOLS", sourceLabel(model, data), "Page 1 of 3");
+  let y = drawPageHeader(doc, "SALES FORECASTING TOOLS", sourceLabel(model, data), "Page 2 of 3");
   const margin = 26;
   const gap = 12;
   // Page 1 mirrors the complete source assessment: its full weighted score
@@ -290,7 +290,7 @@ async function drawForecastPage(doc, data, model, assets) {
 
 async function drawInformationPage(doc, data, model, assets) {
   const pageWidth = doc.internal.pageSize.getWidth();
-  let y = drawPageHeader(doc, "BUSINESS FEASIBILITY INFORMATION", sourceLabel(model, data), "Page 2 of 3");
+  let y = drawPageHeader(doc, "BUSINESS FEASIBILITY INFORMATION", sourceLabel(model, data), "Page 1 of 3");
   const margin = 26;
   const gap = 18;
   const leftWidth = 365;
@@ -563,9 +563,12 @@ export async function buildFeasibilityPdf(data, model, assets = []) {
   const jsPDF = globalThis.jspdf?.jsPDF;
   if (!jsPDF) throw new Error("PDF export module did not load. Refresh the page and try again.");
   const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4", compress: true });
-  await drawForecastPage(doc, data, model, assets);
-  doc.addPage("a4", "landscape");
+  // Page order: Information, then Sales Forecasting Tools, then the feasibility
+  // statement. Both of the first two are A4 landscape, so only the draw order
+  // changes; the A3 portrait page stays last.
   await drawInformationPage(doc, data, model, assets);
+  doc.addPage("a4", "landscape");
+  await drawForecastPage(doc, data, model, assets);
   doc.addPage("a3", "portrait");
   await drawFeasibilityPage(doc, data, model, assets);
   return doc;
