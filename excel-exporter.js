@@ -605,8 +605,22 @@ async function getConfiguredRulesWorkbook() {
   return { buffer: await response.arrayBuffer(), sourceName };
 }
 
+const REPORT_SHEET_NAMES = [
+  "Sales forecasting tools",
+  "INFORMATION",
+  "AUTO GENERATED FEASIBILITY",
+];
+
+function removeExistingReportSheets(workbook) {
+  const names = new Set(REPORT_SHEET_NAMES.map((name) => name.toLocaleLowerCase()));
+  const sheetsToReplace = workbook.worksheets.filter((sheet) =>
+    names.has(String(sheet.name || "").toLocaleLowerCase())
+  );
+  sheetsToReplace.forEach((sheet) => workbook.removeWorksheet(sheet.id));
+}
+
 /**
- * Download Excel with Rules (CORRECTED)
+ * Download Excel with Rules
  *
  * Uses the current dashboard data/model to rebuild the three report sheets,
  * while retaining the master workbook support sheets, formulas and rules.
@@ -638,21 +652,19 @@ export async function downloadRulesWorkbook(
   /*
     IMPORTANT:
     Rebuild report sheets from CURRENT Data Entry values.
-    Do not download the untouched master workbook.
+    Remove the master workbook's old report sheets first.  Their names are
+    reused below, while all formula/rule support sheets remain untouched.
   */
 
   workbook.created = exportedAt;
   workbook.modified = exportedAt;
+  removeExistingReportSheets(workbook);
   await addScoreSheet(workbook, data, model, assets, exportedAt);
   await addInformationSheet(workbook, data, model, assets, exportedAt);
   await addFeasibilitySheet(workbook, data, model, assets, exportedAt);
 
   // Keep report sheets visible, hide support/master sheets.
-  const visibleSheets = new Set([
-    "Sales forecasting tools",
-    "INFORMATION",
-    "AUTO GENERATED FEASIBILITY",
-  ]);
+  const visibleSheets = new Set(REPORT_SHEET_NAMES);
 
   workbook.eachSheet((sheet) => {
     sheet.state = visibleSheets.has(sheet.name)
