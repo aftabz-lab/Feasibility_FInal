@@ -1025,6 +1025,47 @@ function patchWorksheetFooter(zip, path, exportedAt) {
   writeXmlContent(entry, xml);
 }
 
+
+/*
+ * The master workbook contains xl/calcChain.xml. Once dashboard values and
+ * formulas are synchronized, that chain is no longer valid: it can still
+ * point at cells that are now values and omit newly-formula cells. Microsoft
+ * Excel treats a stale calculation chain as damaged workbook content and
+ * opens the recovery prompt even though the worksheet XML itself is valid.
+ *
+ * A calculation chain is optional OOXML metadata. Removing it is the correct
+ * repair: Excel rebuilds the chain from the formulas on first calculation.
+ * This does NOT change any dashboard rule, worksheet formula, validation,
+ * conditional formatting, named range, drawing, or other workbook rule.
+ */
+function removeStaleCalculationChain(zip) {
+  const cfbApi = getCfbApi();
+
+  const relationshipsEntry = zipEntry(zip, "xl/_rels/workbook.xml.rels");
+  if (relationshipsEntry) {
+    let relationshipsXml = readXmlContent(relationshipsEntry);
+    relationshipsXml = relationshipsXml.replace(
+      /<Relationship\b(?=[^>]*\bType="[^"]*\/calcChain")[^>]*\/>/gi,
+      ""
+    );
+    writeXmlContent(relationshipsEntry, relationshipsXml);
+  }
+
+  const contentTypesEntry = zipEntry(zip, "[Content_Types].xml");
+  if (contentTypesEntry) {
+    let contentTypesXml = readXmlContent(contentTypesEntry);
+    contentTypesXml = contentTypesXml.replace(
+      /<Override\b(?=[^>]*\bPartName="\/xl\/calcChain\.xml")[^>]*\/>/gi,
+      ""
+    );
+    writeXmlContent(contentTypesEntry, contentTypesXml);
+  }
+
+  // SheetJS CFB path lookup accepts an absolute package path for deletion.
+  // If a template has no calc chain this is intentionally a no-op.
+  if (cfbApi.utils?.cfb_del) cfbApi.utils.cfb_del(zip, "/xl/calcChain.xml");
+}
+
 function setWorkbookSheetVisibility(workbookXml, visibleSheetNames) {
   const visible = new Set(visibleSheetNames.map((name) => name.toLocaleLowerCase()));
   const sheetNames = workbookSheetNames(workbookXml);
@@ -1450,6 +1491,11 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     workbookEntry,
     setWorkbookSheetVisibility(workbookXml, REPORT_SHEET_NAMES),
   );
+
+  // Formula synchronization invalidates the template's cached calculation
+  // dependency chain. Removing this optional cache prevents Excel's repair
+  // dialog and lets Excel rebuild it safely from the dashboard formulas.
+  removeStaleCalculationChain(zip);
 
   return cfbApi.write(zip, {
     type: "array",
