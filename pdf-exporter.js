@@ -582,3 +582,40 @@ export async function downloadFeasibilityPdf(data, model, assets = []) {
   const doc = await buildFeasibilityPdf(data, model, assets);
   doc.save(`${safeName(data.project.locationArea)}_feasibility_report.pdf`);
 }
+
+export function mailtoLink(subject = "", body = "") {
+  const params = new URLSearchParams();
+  if (subject) params.set("subject", subject);
+  if (body) params.set("body", body);
+  const query = params.toString();
+  return query ? `mailto:?${query}` : "mailto:";
+}
+
+export function whatsappLink(text = "") {
+  return `https://wa.me/?text=${encodeURIComponent(String(text ?? ""))}`;
+}
+
+export async function shareFeasibilityPdf(data, model, assets = []) {
+  const doc = await buildFeasibilityPdf(data, model, assets);
+  const location = String(data?.project?.locationArea || "New location");
+  const fileName = `${safeName(location)}_feasibility_report.pdf`;
+  const subject = `Feasibility report – ${location}`;
+  const body = "Please find the attached feasibility report.";
+  const blob = doc.output("blob");
+  const canUseShareSheet = typeof navigator !== "undefined" && typeof navigator.share === "function";
+  const file = typeof File !== "undefined"
+    ? new File([blob], fileName, { type: "application/pdf" })
+    : null;
+
+  if (canUseShareSheet && file && (!navigator.canShare || navigator.canShare({ files: [file] }))) {
+    try {
+      await navigator.share({ title: subject, text: body, files: [file] });
+      return { method: "share-sheet", fileName, subject, body };
+    } catch (error) {
+      if (error?.name === "AbortError") return { method: "cancelled", fileName, subject, body };
+    }
+  }
+
+  doc.save(fileName);
+  return { method: "download", fileName, subject, body };
+}
