@@ -629,6 +629,158 @@ async function getConfiguredRulesWorkbook() {
   return { buffer: await response.arrayBuffer(), sourceName };
 }
 
+/*
+ * ExcelJS can read worksheet formulas and cell validation, but it does not
+ * retain complex workbook-level defined names from this master file.  Those
+ * names are the rules behind the template (for example payment, print and
+ * lookup rules).  It also writes one legacy auto-filter name without its
+ * worksheet scope, which is what makes Microsoft Excel display its recovery
+ * prompt.  The helpers below preserve the original definitions as raw OOXML,
+ * remap their sheet scopes after the three report sheets are rebuilt, and put
+ * them back into the finished workbook with valid localSheetId values.
+ */
+function getCfbApi() {
+  const cfb = globalThis.XLSX?.CFB;
+  if (!cfb?.read || !cfb?.write || !cfb?.find) {
+    throw new Error("Workbook rules module did not load. Refresh the page and try again.");
+  }
+  return cfb;
+}
+
+function asUint8Array(value) {
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  throw new Error("The workbook data is not a valid Excel file.");
+}
+
+function readXmlContent(entry) {
+  if (!entry?.content) throw new Error("The workbook is missing its Excel metadata.");
+  return new TextDecoder("utf-8").decode(asUint8Array(entry.content));
+}
+
+function decodeXmlEntities(value) {
+  return String(value || "")
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&amp;/gi, "&")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)));
+}
+
+function workbookSheetNames(workbookXml) {
+  const names = [];
+  const pattern = /<sheet\b[^>]*\bname="([^"]*)"[^>]*>/gi;
+  let match;
+  while ((match = pattern.exec(workbookXml))) names.push(decodeXmlEntities(match[1]));
+  return names;
+}
+
+function definedNamesBlock(workbookXml) {
+  return workbookXml.match(/<definedNames\b[^>]*>[\s\S]*?<\/definedNames>/i)?.[0] || "";
+}
+
+function definedNameEntries(block) {
+  return block.match(/<definedName\b[^>]*(?:\/>|>[\s\S]*?<\/definedName>)/gi) || [];
+}
+
+function xmlAttribute(xml, attribute) {
+  const match = xml.match(new RegExp(`\\b${attribute}="([^"]*)"`, "i"));
+  return match ? decodeXmlEntities(match[1]) : "";
+}
+
+function definedNameScope(entry, sheetNames) {
+  const localSheetId = xmlAttribute(entry, "localSheetId");
+  if (localSheetId === "") return "";
+  return sheetNames[Number(localSheetId)] || "";
+}
+
+function sameSheetName(left, right) {
+  return String(left || "").toLocaleLowerCase() === String(right || "").toLocaleLowerCase();
+}
+
+function isReportSheetName(name) {
+  return REPORT_SHEET_NAMES.some((reportName) => sameSheetName(reportName, name));
+}
+
+function isReportPrintArea(entry, sheetNames) {
+  return xmlAttribute(entry, "name").toLocaleLowerCase() === "_xlnm.print_area"
+    && isReportSheetName(definedNameScope(entry, sheetNames));
+}
+
+function remapDefinedNameScope(entry, sourceSheetNames, outputSheetNames) {
+  const scope = definedNameScope(entry, sourceSheetNames);
+  if (!scope) return entry;
+  const mappedIndex = outputSheetNames.findIndex((sheetName) => sameSheetName(sheetName, scope));
+  if (mappedIndex < 0) return "";
+  return entry.replace(/\blocalSheetId="\d+"/i, `localSheetId="${mappedIndex}"`);
+}
+
+function replaceDefinedNamesBlock(workbookXml, replacement) {
+  const current = definedNamesBlock(workbookXml);
+  if (current) return workbookXml.replace(current, replacement);
+  const closingTag = "</workbook>";
+  const closingIndex = workbookXml.lastIndexOf(closingTag);
+  if (closingIndex < 0) throw new Error("The workbook metadata is invalid.");
+  return `${workbookXml.slice(0, closingIndex)}${replacement}${workbookXml.slice(closingIndex)}`;
+}
+
+function captureTemplateRuleMetadata(sourceBuffer) {
+  const cfbApi = getCfbApi();
+  const templateZip = cfbApi.read(asUint8Array(sourceBuffer), { type: "array" });
+  const workbookEntry = cfbApi.find(templateZip, "workbook.xml");
+  const workbookXml = readXmlContent(workbookEntry);
+  const sourceSheetNames = workbookSheetNames(workbookXml);
+  const sourceDefinedNames = definedNamesBlock(workbookXml);
+  if (!sourceSheetNames.length || !sourceDefinedNames) {
+    throw new Error("The selected workbook does not contain the required rules metadata.");
+  }
+  return { sourceSheetNames, sourceDefinedNames };
+}
+
+function restoreTemplateRuleMetadata(outputBuffer, templateMetadata) {
+  const cfbApi = getCfbApi();
+  const exportZip = cfbApi.read(asUint8Array(outputBuffer), { type: "array" });
+  const workbookEntry = cfbApi.find(exportZip, "workbook.xml");
+  const outputWorkbookXml = readXmlContent(workbookEntry);
+  const outputSheetNames = workbookSheetNames(outputWorkbookXml);
+  const outputDefinedNames = definedNamesBlock(outputWorkbookXml);
+
+  const generatedReportPrintAreas = definedNameEntries(outputDefinedNames)
+    .filter((entry) => isReportPrintArea(entry, outputSheetNames));
+  const generatedReportScopes = new Set(
+    generatedReportPrintAreas.map((entry) => definedNameScope(entry, outputSheetNames).toLocaleLowerCase())
+  );
+
+  const retainedTemplateEntries = definedNameEntries(templateMetadata.sourceDefinedNames)
+    .filter((entry) => {
+      if (!isReportPrintArea(entry, templateMetadata.sourceSheetNames)) return true;
+      const scope = definedNameScope(entry, templateMetadata.sourceSheetNames).toLocaleLowerCase();
+      return !generatedReportScopes.has(scope);
+    })
+    .map((entry) => remapDefinedNameScope(
+      entry,
+      templateMetadata.sourceSheetNames,
+      outputSheetNames,
+    ))
+    .filter(Boolean);
+
+  const restoredDefinedNames = `<definedNames>${[
+    ...retainedTemplateEntries,
+    ...generatedReportPrintAreas,
+  ].join("")}</definedNames>`;
+
+  workbookEntry.content = new TextEncoder().encode(
+    replaceDefinedNamesBlock(outputWorkbookXml, restoredDefinedNames)
+  );
+
+  return cfbApi.write(exportZip, {
+    type: "array",
+    fileType: "zip",
+    compression: true,
+  });
+}
+
 const REPORT_SHEET_NAMES = [
   "Sales forecasting tools",
   "INFORMATION",
@@ -645,15 +797,11 @@ function removeExistingReportSheets(workbook) {
 
 function removeTemplateDefinedNames(workbook) {
   /*
-    The supplied master workbook has a legacy, worksheet-scoped auto-filter
-    name. ExcelJS reads that name without its worksheet scope, then writes it
-    back as a global name. Microsoft Excel treats that generated metadata as
-    damaged content and asks the user to recover the workbook.
-
-    ExcelJS creates valid print-area names from each retained worksheet's own
-    page setup during export, so clearing the imported name collection removes
-    the invalid legacy metadata without removing the workbook's sheets,
-    formulas, validations, formatting, or report print areas.
+    Clear the partial model that ExcelJS exposes.  The complete original
+    definition list is restored from the raw template after serialization by
+    restoreTemplateRuleMetadata(), so no workbook rules are lost.  This also
+    prevents ExcelJS from writing a global _FilterDatabase name with no local
+    worksheet scope, which is the source of the Excel repair warning.
   */
   if (workbook?.definedNames && "model" in workbook.definedNames) {
     workbook.definedNames.model = [];
@@ -683,16 +831,18 @@ export async function downloadRulesWorkbook(
   const saveHandlePromise = beginLaptopSave(safeName);
 
   let workbook;
+  let templateBuffer;
 
   // Load master workbook as the rules base.
   if (sourceBuffer instanceof ArrayBuffer && sourceBuffer.byteLength > 0) {
-    workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(sourceBuffer);
+    templateBuffer = sourceBuffer;
   } else {
     const configuredWorkbook = await getConfiguredRulesWorkbook();
-    workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(configuredWorkbook.buffer);
+    templateBuffer = configuredWorkbook.buffer;
   }
+  const templateMetadata = captureTemplateRuleMetadata(templateBuffer);
+  workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(templateBuffer);
 
   /*
     IMPORTANT:
@@ -703,6 +853,8 @@ export async function downloadRulesWorkbook(
 
   workbook.created = exportedAt;
   workbook.modified = exportedAt;
+  workbook.calcProperties.fullCalcOnLoad = true;
+  workbook.calcProperties.forceFullCalc = true;
   removeTemplateDefinedNames(workbook);
   removeExistingReportSheets(workbook);
   await addScoreSheet(workbook, data, model, assets, exportedAt);
@@ -718,7 +870,8 @@ export async function downloadRulesWorkbook(
       : "hidden";
   });
 
-  const buffer = await workbook.xlsx.writeBuffer();
+  let buffer = await workbook.xlsx.writeBuffer();
+  buffer = restoreTemplateRuleMetadata(buffer, templateMetadata);
 
   const blob = new Blob(
     [buffer],
