@@ -568,17 +568,18 @@ export async function buildValuesOnlyWorkbook(data, model, assets = []) {
 }
 
 export async function downloadValuesOnlyWorkbook(data, model, assets = []) {
+  const fileName = `${safeFileName(data?.project?.locationArea, "Feasibility")}_values_only.xlsx`;
+  // Start the save dialog while this action still has the user's click.  The
+  // workbook build is asynchronous, so opening it later can be blocked by the
+  // browser as a non-user-initiated action.
+  const saveHandlePromise = beginLaptopSave(fileName);
   const workbook = await buildValuesOnlyWorkbook(data, model, assets);
   const buffer = await workbook.xlsx.writeBuffer();
   const blob = new Blob([buffer], { type: XLSX_MIME });
-  const anchor = document.createElement("a");
-  const safeName = String(data.project.locationArea || "Feasibility").replace(/[^a-z0-9]+/gi, "_").replace(/^_|_$/g, "").slice(0, 55) || "Feasibility";
-  anchor.href = URL.createObjectURL(blob);
-  anchor.download = `${safeName}_values_only.xlsx`;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => URL.revokeObjectURL(anchor.href), 1000);
+  return {
+    method: await saveBlobToLaptop(blob, fileName, saveHandlePromise),
+    fileName,
+  };
 }
 
 function safeFileName(value, fallback = "Feasibility") {
@@ -594,6 +595,29 @@ function downloadBlob(blob, fileName) {
   anchor.click();
   anchor.remove();
   window.setTimeout(() => URL.revokeObjectURL(anchor.href), 1000);
+}
+
+function beginLaptopSave(fileName) {
+  if (typeof window === "undefined" || typeof window.showSaveFilePicker !== "function") return null;
+  return window.showSaveFilePicker({
+    suggestedName: fileName,
+    types: [{
+      description: "Excel workbook",
+      accept: { [XLSX_MIME]: [".xlsx"] },
+    }],
+  });
+}
+
+async function saveBlobToLaptop(blob, fileName, saveHandlePromise) {
+  if (saveHandlePromise) {
+    const handle = await saveHandlePromise;
+    const writable = await handle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+    return "save-picker";
+  }
+  downloadBlob(blob, fileName);
+  return "browser-download";
 }
 
 async function getConfiguredRulesWorkbook() {
@@ -619,6 +643,23 @@ function removeExistingReportSheets(workbook) {
   sheetsToReplace.forEach((sheet) => workbook.removeWorksheet(sheet.id));
 }
 
+function removeTemplateDefinedNames(workbook) {
+  /*
+    The supplied master workbook has a legacy, worksheet-scoped auto-filter
+    name. ExcelJS reads that name without its worksheet scope, then writes it
+    back as a global name. Microsoft Excel treats that generated metadata as
+    damaged content and asks the user to recover the workbook.
+
+    ExcelJS creates valid print-area names from each retained worksheet's own
+    page setup during export, so clearing the imported name collection removes
+    the invalid legacy metadata without removing the workbook's sheets,
+    formulas, validations, formatting, or report print areas.
+  */
+  if (workbook?.definedNames && "model" in workbook.definedNames) {
+    workbook.definedNames.model = [];
+  }
+}
+
 /**
  * Download Excel with Rules
  *
@@ -636,6 +677,10 @@ export async function downloadRulesWorkbook(
   }
 
   const exportedAt = new Date();
+  const safeName = safeFileName(data?.project?.locationArea, "Feasibility") + ".xlsx";
+  // This must happen before the first await so Chrome/Edge/Opera can open the
+  // laptop's normal Save As window and let the user choose a folder and name.
+  const saveHandlePromise = beginLaptopSave(safeName);
 
   let workbook;
 
@@ -658,6 +703,7 @@ export async function downloadRulesWorkbook(
 
   workbook.created = exportedAt;
   workbook.modified = exportedAt;
+  removeTemplateDefinedNames(workbook);
   removeExistingReportSheets(workbook);
   await addScoreSheet(workbook, data, model, assets, exportedAt);
   await addInformationSheet(workbook, data, model, assets, exportedAt);
@@ -679,16 +725,10 @@ export async function downloadRulesWorkbook(
     { type: XLSX_MIME }
   );
 
-  const safeName =
-    safeFileName(
-      data?.project?.locationArea,
-      "Feasibility"
-    ) + "_with_rules.xlsx";
-
-  downloadBlob(blob, safeName);
+  const method = await saveBlobToLaptop(blob, safeName, saveHandlePromise);
 
   return {
-    method: "browser-download",
+    method,
     fileName: safeName,
   };
 }
