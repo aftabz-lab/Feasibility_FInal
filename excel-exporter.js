@@ -808,11 +808,336 @@ function removeTemplateDefinedNames(workbook) {
   }
 }
 
+function encodeXmlText(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function zipEntry(zip, path) {
+  const cfbApi = getCfbApi();
+  return cfbApi.find(zip, path) || cfbApi.find(zip, path.split("/").pop());
+}
+
+function writeXmlContent(entry, xml) {
+  if (!entry) throw new Error("The master workbook is missing required Excel content.");
+  entry.content = new TextEncoder().encode(xml);
+}
+
+function normalizeWorkbookTarget(target) {
+  const clean = String(target || "").replace(/\\/g, "/").replace(/^\/+/, "");
+  if (clean.startsWith("xl/")) return clean;
+  return `xl/${clean.replace(/^\.\//, "")}`;
+}
+
+function worksheetPaths(zip) {
+  const workbookEntry = zipEntry(zip, "xl/workbook.xml");
+  const relationshipsEntry = zipEntry(zip, "xl/_rels/workbook.xml.rels");
+  const workbookXml = readXmlContent(workbookEntry);
+  const relationshipsXml = readXmlContent(relationshipsEntry);
+  const relationshipTargets = new Map();
+  const relationshipPattern = /<Relationship\b[^>]*\/>/gi;
+  let relationshipMatch;
+  while ((relationshipMatch = relationshipPattern.exec(relationshipsXml))) {
+    const tag = relationshipMatch[0];
+    const id = xmlAttribute(tag, "Id");
+    const target = xmlAttribute(tag, "Target");
+    if (id && target) relationshipTargets.set(id, normalizeWorkbookTarget(target));
+  }
+
+  const paths = new Map();
+  const sheetPattern = /<sheet\b[^>]*\/>/gi;
+  let sheetMatch;
+  while ((sheetMatch = sheetPattern.exec(workbookXml))) {
+    const tag = sheetMatch[0];
+    const name = xmlAttribute(tag, "name");
+    const relationshipId = xmlAttribute(tag, "r:id");
+    const target = relationshipTargets.get(relationshipId);
+    if (name && target) paths.set(name, target);
+  }
+  return { paths, workbookEntry, workbookXml };
+}
+
+function cellColumnIndex(address) {
+  const letters = String(address || "").match(/^[A-Z]+/i)?.[0]?.toUpperCase() || "";
+  let result = 0;
+  for (const letter of letters) result = result * 26 + letter.charCodeAt(0) - 64;
+  return result;
+}
+
+function openingCellTag(original, address, type = "") {
+  const sourceTag = original?.match(/^<c\b[^>]*(?:\/>|>)/i)?.[0] || `<c r="${address}">`;
+  let tag = sourceTag
+    .replace(/\s+t="[^"]*"/gi, "")
+    .replace(/\/>$/, ">")
+    .replace(/>$/, "");
+  if (!/\br="[^"]*"/i.test(tag)) tag += ` r="${address}"`;
+  if (type) tag += ` t="${type}"`;
+  return `${tag}>`;
+}
+
+function replacementCellXml(original, address, value) {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error(`Invalid numeric value for ${address}.`);
+    return `${openingCellTag(original, address)}<v>${String(value)}</v></c>`;
+  }
+  if (typeof value === "boolean") {
+    return `${openingCellTag(original, address, "b")}<v>${value ? "1" : "0"}</v></c>`;
+  }
+  const textValue = String(value ?? "");
+  const preserve = /^\s|\s$/.test(textValue) ? ' xml:space="preserve"' : "";
+  return `${openingCellTag(original, address, "inlineStr")}<is><t${preserve}>${encodeXmlText(textValue)}</t></is></c>`;
+}
+
+function replaceOrInsertCell(sheetXml, address, value) {
+  const safeAddress = String(address).toUpperCase();
+  const selfClosingCellPattern = new RegExp(
+    `<c\\b(?=[^>]*\\br="${safeAddress}")[^>]*\\/>`,
+    "i",
+  );
+  const pairedCellPattern = new RegExp(
+    `<c\\b(?=[^>]*\\br="${safeAddress}")(?![^>]*\\/>)[^>]*>[\\s\\S]*?<\\/c>`,
+    "i",
+  );
+  const cellPattern = selfClosingCellPattern.test(sheetXml)
+    ? selfClosingCellPattern
+    : pairedCellPattern;
+  const current = sheetXml.match(cellPattern)?.[0] || "";
+  const replacement = replacementCellXml(current, safeAddress, value);
+  if (current) return sheetXml.replace(cellPattern, replacement);
+
+  const rowNumber = Number(safeAddress.match(/\d+$/)?.[0]);
+  const rowPattern = new RegExp(`<row\\b(?=[^>]*\\br="${rowNumber}")[^>]*>[\\s\\S]*?<\\/row>`, "i");
+  const rowXml = sheetXml.match(rowPattern)?.[0];
+  if (!rowXml) throw new Error(`The master workbook is missing row ${rowNumber}.`);
+
+  const targetColumn = cellColumnIndex(safeAddress);
+  let inserted = false;
+  const updatedRow = rowXml.replace(/<c\b[^>]*\/>|<c\b(?![^>]*\/>)[^>]*>[\s\S]*?<\/c>/gi, (cellXml) => {
+    const reference = xmlAttribute(cellXml, "r");
+    if (!inserted && cellColumnIndex(reference) > targetColumn) {
+      inserted = true;
+      return `${replacement}${cellXml}`;
+    }
+    return cellXml;
+  });
+  const finalRow = inserted ? updatedRow : updatedRow.replace(/<\/row>$/i, `${replacement}</row>`);
+  return sheetXml.replace(rowPattern, finalRow);
+}
+
+function patchWorksheetValues(zip, path, values) {
+  const entry = zipEntry(zip, path);
+  if (!entry) throw new Error(`The master workbook is missing ${path}.`);
+  let xml = readXmlContent(entry);
+  Object.entries(values).forEach(([address, value]) => {
+    if (value !== undefined) xml = replaceOrInsertCell(xml, address, value);
+  });
+  writeXmlContent(entry, xml);
+}
+
+function patchWorksheetFooter(zip, path, exportedAt) {
+  const entry = zipEntry(zip, path);
+  if (!entry) throw new Error(`The master workbook is missing ${path}.`);
+  let xml = readXmlContent(entry);
+  const footerText = `&LGenerated on: ${formatExportTimestamp(exportedAt)}&RPage &P of &N`;
+  const oddFooter = `<oddFooter>${encodeXmlText(footerText)}</oddFooter>`;
+  const headerFooterPattern = /<headerFooter\b[^>]*>[\s\S]*?<\/headerFooter>/i;
+  const selfClosingPattern = /<headerFooter\b[^>]*\/>/i;
+  const current = xml.match(headerFooterPattern)?.[0];
+  if (current) {
+    const revised = /<oddFooter\b[^>]*>[\s\S]*?<\/oddFooter>/i.test(current)
+      ? current.replace(/<oddFooter\b[^>]*>[\s\S]*?<\/oddFooter>/i, oddFooter)
+      : current.replace(/<\/headerFooter>/i, `${oddFooter}</headerFooter>`);
+    xml = xml.replace(headerFooterPattern, revised);
+  } else if (selfClosingPattern.test(xml)) {
+    xml = xml.replace(selfClosingPattern, `<headerFooter>${oddFooter}</headerFooter>`);
+  } else {
+    const block = `<headerFooter>${oddFooter}</headerFooter>`;
+    xml = /<pageMargins\b/i.test(xml)
+      ? xml.replace(/<pageMargins\b/i, `${block}<pageMargins`)
+      : xml.replace(/<\/worksheet>/i, `${block}</worksheet>`);
+  }
+  writeXmlContent(entry, xml);
+}
+
+function setWorkbookSheetVisibility(workbookXml, visibleSheetNames) {
+  const visible = new Set(visibleSheetNames.map((name) => name.toLocaleLowerCase()));
+  const sheetNames = workbookSheetNames(workbookXml);
+  const activeTab = Math.max(0, sheetNames.findIndex((name) => sameSheetName(name, visibleSheetNames[0])));
+  let output = workbookXml.replace(/<sheet\b[^>]*\/>/gi, (sheetTag) => {
+    const name = xmlAttribute(sheetTag, "name");
+    const state = visible.has(name.toLocaleLowerCase()) ? "visible" : "hidden";
+    let revised = sheetTag.replace(/\s+state="[^"]*"/i, "");
+    revised = revised.replace(/\/>$/, ` state="${state}"/>`);
+    return revised;
+  });
+  output = output.replace(/<workbookView\b[^>]*\/>/i, (viewTag) => {
+    let revised = viewTag
+      .replace(/\s+activeTab="[^"]*"/i, "")
+      .replace(/\s+firstSheet="[^"]*"/i, "");
+    return revised.replace(/\/>$/, ` firstSheet="${activeTab}" activeTab="${activeTab}"/>`);
+  });
+  output = output.replace(/<calcPr\b[^>]*\/>/i, (calcTag) => {
+    let revised = calcTag
+      .replace(/\s+calcMode="[^"]*"/i, "")
+      .replace(/\s+fullCalcOnLoad="[^"]*"/i, "")
+      .replace(/\s+forceFullCalc="[^"]*"/i, "");
+    return revised.replace(/\/>$/, ' calcMode="auto" fullCalcOnLoad="1" forceFullCalc="1"/>');
+  });
+  return output;
+}
+
+function staffById(data, id) {
+  return (data?.staff || []).find((item) => item.id === id) || {};
+}
+
+function optionalWorkbookValue(value) {
+  return value === null || value === undefined || value === "" ? undefined : value;
+}
+
+function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt) {
+  const cfbApi = getCfbApi();
+  const zip = cfbApi.read(asUint8Array(templateBuffer), { type: "array" });
+  const { paths, workbookEntry, workbookXml } = worksheetPaths(zip);
+  const requiredSheets = [
+    "Master",
+    "Sales forecasting tools",
+    "INFORMATION",
+    "AUTO GENERATED FEASIBILITY",
+  ];
+  const missing = requiredSheets.filter((name) => !paths.has(name));
+  if (missing.length) throw new Error(`The rules workbook is missing: ${missing.join(", ")}.`);
+
+  const masterValues = {
+    C2: data?.project?.locationArea ?? "",
+    C3: data?.project?.pnp ?? "",
+    C4: data?.project?.frOwn ?? "",
+    C5: Number(data?.project?.sft || 0),
+    C6: data?.project?.density ?? "",
+    C7: data?.project?.incomeLevel ?? "",
+    C8: Number(data?.project?.longFeet || 0),
+    C9: Number(data?.project?.projectedDailySales || 0),
+    C10: Number(data?.project?.monthlyRent || 0),
+    C11: Number(data?.project?.advance || 0),
+    C12: Number(staffById(data, "om").quantity || 0),
+    C13: Number(staffById(data, "icmo").quantity || 0),
+    C14: Number(staffById(data, "duty").quantity || 0),
+    C15: Number(staffById(data, "cg").quantity || 0),
+    C16: Number(staffById(data, "commodity").quantity || 0),
+    C17: Number(staffById(data, "protein").quantity || 0),
+    C18: Number(staffById(data, "perishables").quantity || 0),
+    C19: Number(staffById(data, "gml").quantity || 0),
+    C20: Number(staffById(data, "pos").quantity || 0),
+    C21: Number(staffById(data, "porter").quantity || 0),
+    C22: Number(staffById(data, "bsm").quantity || 0),
+    C23: Number(staffById(data, "bkstr").quantity || 0),
+    C24: Number(staffById(data, "security").quantity || 0),
+    C25: Number(staffById(data, "cleaner").quantity || 0),
+    C26: Number(data?.project?.outboundTransport || 0),
+    C27: data?.project?.salesGivenBy ?? "",
+    C28: data?.project?.openedBy ?? "",
+    C30: Number(data?.project?.existingOutlets || 0),
+  };
+  patchWorksheetValues(zip, paths.get("Master"), masterValues);
+
+  const forecastValues = {
+    C21: data?.project?.division ?? "",
+    E6: data?.project?.locationType ?? "",
+    F7: data?.forecast?.marketNearby ?? "",
+    F8: Number(data?.forecast?.avgDepartmentalSales || 0),
+    F9: data?.forecast?.roadStatus ?? "",
+    F10: Number(data?.forecast?.worshipCount || 0),
+    F11: Number(data?.forecast?.educationCount || 0),
+    F12: Number(data?.forecast?.bankOfficeCount || 0),
+    F13: Number(data?.forecast?.competitorAvgSales || 0),
+    F14: data?.forecast?.publicTransit ?? "",
+    F16: data?.forecast?.signboardVisibility ?? "",
+    F17: Number(data?.forecast?.hotelRestaurantHospitalCount || 0),
+    C23: optionalWorkbookValue(data?.project?.gpPercentOverride),
+    C30: optionalWorkbookValue(data?.information?.basketSizeOverride),
+    C32: optionalWorkbookValue(data?.information?.footfallOverride),
+  };
+  patchWorksheetValues(zip, paths.get("Sales forecasting tools"), forecastValues);
+
+  const informationValues = {
+    B7: Number(model?.inputs?.gpShare ?? data?.reference?.autoGpShareFr ?? 0),
+    B9: optionalWorkbookValue(data?.project?.monthlySalesOverride),
+    B13: Number(data?.information?.otherIncomeRate || 0),
+    B17: optionalWorkbookValue(data?.information?.cepValueOverride),
+    B19: optionalWorkbookValue(data?.information?.decorationCostOverride),
+    F7: Number(staffById(data, "om").salary || 0),
+    F8: Number(staffById(data, "icmo").salary || 0),
+    F9: Number(staffById(data, "duty").salary || 0),
+    F12: Number(staffById(data, "cg").salary || 0),
+    F13: Number(staffById(data, "commodity").salary || 0),
+    F14: Number(staffById(data, "protein").salary || 0),
+    F15: Number(staffById(data, "perishables").salary || 0),
+    F16: Number(staffById(data, "gml").salary || 0),
+    F17: Number(staffById(data, "pos").salary || 0),
+    F18: Number(staffById(data, "porter").salary || 0),
+    F19: Number(staffById(data, "bsm").salary || 0),
+    F20: Number(staffById(data, "bkstr").salary || 0),
+    F21: Number(staffById(data, "security").salary || 0),
+    F22: Number(staffById(data, "cleaner").salary || 0),
+  };
+  patchWorksheetValues(zip, paths.get("INFORMATION"), informationValues);
+
+  const advanced = data?.advanced || {};
+  const feasibilityValues = {
+    B24: Number(advanced.consumptionRate ?? 0.0065),
+    C25: Number(advanced.electricityMonthly || 0),
+    D25: Number(advanced.electricityMonthly || 0),
+    E25: Number(advanced.electricityMonthly || 0),
+    C27: Number(advanced.maintenanceMonthly || 0),
+    D27: Number(advanced.maintenanceMonthly || 0),
+    E27: Number(advanced.maintenanceMonthly || 0),
+    C29: Number(advanced.generatorMonthly || 0),
+    D29: Number(advanced.generatorMonthly || 0),
+    E29: Number(advanced.generatorMonthly || 0),
+    C31: Number(advanced.outletOpexInitial ?? 25000),
+    D31: Number(advanced.outletOpexRecurringMonthly ?? 5000),
+    B33: Number(advanced.membershipDiscountRate ?? 0.0038),
+    C34: Number(advanced.insuranceMonthly ?? 2500),
+    C35: Number(advanced.promotionalMonthly || 0),
+    B37: Number(advanced.denominationRate ?? 0.0003),
+    B38: Number(advanced.creditCardRate ?? 0.003),
+    C39: Number(advanced.conveyanceMonthly ?? 4000),
+    C40: Number(advanced.printingMonthly ?? 2500),
+    C41: Number(advanced.entertainmentMonthly ?? 1000),
+    B48: Number(advanced.outletFinanceRate ?? 0.14),
+    C59: Number(advanced.securityDeposit || 0),
+    B63: Number(advanced.rentVatRate ?? 0.15),
+    B65: Number(advanced.franchiseFinanceRate ?? 0.09),
+    C68: optionalWorkbookValue(advanced.franchiseElectricityMonthlyOverride),
+    G67: Number(advanced.terminalRecovery ?? 3000000),
+    C69: Number(advanced.franchiseMaintenanceMonthly ?? 2000),
+    C70: Number(advanced.franchiseGeneratorMonthly ?? 2000),
+    C71: Number(advanced.franchiseIceMonthly || 0),
+    C72: Number(advanced.franchiseServiceMonthly || 0),
+    B88: Number(advanced.discountRate ?? 0.09),
+  };
+  patchWorksheetValues(zip, paths.get("AUTO GENERATED FEASIBILITY"), feasibilityValues);
+
+  REPORT_SHEET_NAMES.forEach((name) => patchWorksheetFooter(zip, paths.get(name), exportedAt));
+  writeXmlContent(
+    workbookEntry,
+    setWorkbookSheetVisibility(workbookXml, REPORT_SHEET_NAMES),
+  );
+
+  return cfbApi.write(zip, {
+    type: "array",
+    fileType: "zip",
+    compression: true,
+  });
+}
+
 /**
  * Download Excel with Rules
  *
- * Uses the current dashboard data/model to rebuild the three report sheets,
- * while retaining the master workbook support sheets, formulas and rules.
+ * Writes the current dashboard inputs into the original rules template without
+ * recreating its worksheets. This keeps every formula, validation, drawing,
+ * relationship, named rule and print setting owned by the master workbook.
  */
 export async function downloadRulesWorkbook(
   data,
@@ -820,17 +1145,12 @@ export async function downloadRulesWorkbook(
   assets = [],
   sourceBuffer = null
 ) {
-  if (!globalThis.ExcelJS) {
-    throw new Error("Excel export module did not load. Refresh the page and try again.");
-  }
-
   const exportedAt = new Date();
   const safeName = safeFileName(data?.project?.locationArea, "Feasibility") + ".xlsx";
   // This must happen before the first await so Chrome/Edge/Opera can open the
   // laptop's normal Save As window and let the user choose a folder and name.
   const saveHandlePromise = beginLaptopSave(safeName);
 
-  let workbook;
   let templateBuffer;
 
   // Load master workbook as the rules base.
@@ -840,38 +1160,7 @@ export async function downloadRulesWorkbook(
     const configuredWorkbook = await getConfiguredRulesWorkbook();
     templateBuffer = configuredWorkbook.buffer;
   }
-  const templateMetadata = captureTemplateRuleMetadata(templateBuffer);
-  workbook = new ExcelJS.Workbook();
-  await workbook.xlsx.load(templateBuffer);
-
-  /*
-    IMPORTANT:
-    Rebuild report sheets from CURRENT Data Entry values.
-    Remove the master workbook's old report sheets first.  Their names are
-    reused below, while all formula/rule support sheets remain untouched.
-  */
-
-  workbook.created = exportedAt;
-  workbook.modified = exportedAt;
-  workbook.calcProperties.fullCalcOnLoad = true;
-  workbook.calcProperties.forceFullCalc = true;
-  removeTemplateDefinedNames(workbook);
-  removeExistingReportSheets(workbook);
-  await addScoreSheet(workbook, data, model, assets, exportedAt);
-  await addInformationSheet(workbook, data, model, assets, exportedAt);
-  await addFeasibilitySheet(workbook, data, model, assets, exportedAt);
-
-  // Keep report sheets visible, hide support/master sheets.
-  const visibleSheets = new Set(REPORT_SHEET_NAMES);
-
-  workbook.eachSheet((sheet) => {
-    sheet.state = visibleSheets.has(sheet.name)
-      ? "visible"
-      : "hidden";
-  });
-
-  let buffer = await workbook.xlsx.writeBuffer();
-  buffer = restoreTemplateRuleMetadata(buffer, templateMetadata);
+  const buffer = buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt);
 
   const blob = new Blob(
     [buffer],
