@@ -904,8 +904,10 @@ function replaceOrInsertCell(sheetXml, address, value) {
     ? selfClosingCellPattern
     : pairedCellPattern;
   const current = sheetXml.match(cellPattern)?.[0] || "";
-  const replacement = replacementCellXml(current, safeAddress, value);
-  if (current) return sheetXml.replace(cellPattern, replacement);
+  if (current) {
+    const replacement = replacementCellXml(current, safeAddress, value);
+    return sheetXml.replace(cellPattern, replacement);
+  }
 
   const rowNumber = Number(safeAddress.match(/\d+$/)?.[0]);
   const rowPattern = new RegExp(`<row\\b(?=[^>]*\\br="${rowNumber}")[^>]*>[\\s\\S]*?<\\/row>`, "i");
@@ -913,6 +915,16 @@ function replaceOrInsertCell(sheetXml, address, value) {
   if (!rowXml) throw new Error(`The master workbook is missing row ${rowNumber}.`);
 
   const targetColumn = cellColumnIndex(safeAddress);
+  const cells = [...rowXml.matchAll(/<c\b[^>]*\/>|<c\b(?![^>]*\/>)[^>]*>[\s\S]*?<\/c>/gi)]
+    .map((match) => match[0]);
+  const donor = cells
+    .map((cellXml) => ({ cellXml, distance: Math.abs(cellColumnIndex(xmlAttribute(cellXml, "r")) - targetColumn) }))
+    .sort((left, right) => left.distance - right.distance)[0]?.cellXml || "";
+  const donorSeed = donor
+    ? donor.replace(/\br="[^"]*"/i, `r="${safeAddress}"`)
+    : "";
+  const replacement = replacementCellXml(donorSeed, safeAddress, value);
+
   let inserted = false;
   const updatedRow = rowXml.replace(/<c\b[^>]*\/>|<c\b(?![^>]*\/>)[^>]*>[\s\S]*?<\/c>/gi, (cellXml) => {
     const reference = xmlAttribute(cellXml, "r");
@@ -924,6 +936,50 @@ function replaceOrInsertCell(sheetXml, address, value) {
   });
   const finalRow = inserted ? updatedRow : updatedRow.replace(/<\/row>$/i, `${replacement}</row>`);
   return sheetXml.replace(rowPattern, finalRow);
+}
+
+function replacementFormulaCellXml(original, address, formula, cachedValue) {
+  const encodedFormula = encodeXmlText(String(formula || "").replace(/^=/, ""));
+  if (typeof cachedValue === "number" && Number.isFinite(cachedValue)) {
+    return `${openingCellTag(original, address)}<f>${encodedFormula}</f><v>${String(cachedValue)}</v></c>`;
+  }
+  const textValue = cachedValue === null || cachedValue === undefined ? "" : String(cachedValue);
+  return `${openingCellTag(original, address, "str")}<f>${encodedFormula}</f><v>${encodeXmlText(textValue)}</v></c>`;
+}
+
+function replaceFormulaCell(sheetXml, address, formula, cachedValue) {
+  const safeAddress = String(address).toUpperCase();
+  const selfClosingCellPattern = new RegExp(`<c\\b(?=[^>]*\\br="${safeAddress}")[^>]*\\/>`, "i");
+  const pairedCellPattern = new RegExp(`<c\\b(?=[^>]*\\br="${safeAddress}")(?![^>]*\\/>)[^>]*>[\\s\\S]*?<\\/c>`, "i");
+  const cellPattern = selfClosingCellPattern.test(sheetXml) ? selfClosingCellPattern : pairedCellPattern;
+  const current = sheetXml.match(cellPattern)?.[0] || "";
+  if (!current) throw new Error(`The master workbook is missing ${safeAddress} after value synchronization.`);
+  return sheetXml.replace(cellPattern, replacementFormulaCellXml(current, safeAddress, formula, cachedValue));
+}
+
+function patchWorksheetFormulas(zip, path, formulas) {
+  const entry = zipEntry(zip, path);
+  if (!entry) throw new Error(`The master workbook is missing ${path}.`);
+  let xml = readXmlContent(entry);
+  Object.entries(formulas).forEach(([address, spec]) => {
+    if (!spec || !spec.formula) return;
+    xml = replaceFormulaCell(xml, address, spec.formula, spec.value);
+  });
+  writeXmlContent(entry, xml);
+}
+
+function hideWorksheetRows(zip, path, rows) {
+  const entry = zipEntry(zip, path);
+  if (!entry) throw new Error(`The master workbook is missing ${path}.`);
+  let xml = readXmlContent(entry);
+  rows.forEach((rowNumber) => {
+    const pattern = new RegExp(`<row\\b(?=[^>]*\\br="${rowNumber}")[^>]*>`, "i");
+    xml = xml.replace(pattern, (tag) => {
+      let revised = tag.replace(/\s+hidden="[^"]*"/i, "");
+      return revised.replace(/>$/, ' hidden="1">');
+    });
+  });
+  writeXmlContent(entry, xml);
 }
 
 function patchWorksheetValues(zip, path, values) {
@@ -954,13 +1010,6 @@ function patchWorksheetFooter(zip, path, exportedAt) {
     xml = xml.replace(selfClosingPattern, `<headerFooter>${oddFooter}</headerFooter>`);
   } else {
     const block = `<headerFooter>${oddFooter}</headerFooter>`;
-
-    // OOXML worksheet child order is strict. headerFooter belongs AFTER
-    // pageSetup (and pageMargins), not before pageMargins. Putting it before
-    // pageMargins creates a workbook that browsers can save but desktop Excel
-    // opens with "We found a problem with some content" and repairs.
-    // Insert after the latest available print-layout element so all original
-    // formulas, validations, drawings and relationships remain untouched.
     if (/<pageSetup\b[^>]*\/>/i.test(xml)) {
       xml = xml.replace(/(<pageSetup\b[^>]*\/>)/i, `$1${block}`);
     } else if (/<pageSetup\b[^>]*>[\s\S]*?<\/pageSetup>/i.test(xml)) {
@@ -1011,7 +1060,283 @@ function optionalWorkbookValue(value) {
   return value === null || value === undefined || value === "" ? undefined : value;
 }
 
-function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt) {
+function numberForFormula(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? String(parsed) : String(fallback);
+}
+
+const DASHBOARD_FEASIBILITY_ROWS = [
+  3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24,
+  25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 44,
+  46, 48, 50, 52, 54, 56, 57, 58, 59, 60, 62, 63, 64, 65, 68, 69, 70, 71, 72,
+  73, 75, 77, 79, 81,
+];
+
+function dashboardFormulaSpec(formula, value) {
+  return { formula, value };
+}
+
+function buildDashboardFeasibilityPatch(data, model) {
+  const values = {};
+  const formulas = {};
+  const outputColumns = ["C", "D", "E", "G", "H", "I", "J", "K"];
+  const cellValue = {};
+
+  (model?.rows || []).forEach((row, index) => {
+    const excelRow = DASHBOARD_FEASIBILITY_ROWS[index];
+    if (!excelRow) return;
+    values[`A${excelRow}`] = row.label;
+    if (row.type === "heading") return;
+    values[`B${excelRow}`] = row.rate === null || row.rate === undefined ? "" : Number(row.rate);
+    outputColumns.forEach((column, valueIndex) => {
+      const address = `${column}${excelRow}`;
+      const numericValue = Number(row.values?.[valueIndex] || 0);
+      values[address] = numericValue;
+      cellValue[address] = numericValue;
+    });
+    const totalAddress = `L${excelRow}`;
+    const totalValue = row.total === null || row.total === undefined ? "" : Number(row.total || 0);
+    values[totalAddress] = totalValue;
+    cellValue[totalAddress] = totalValue;
+  });
+
+  const advanced = data?.advanced || {};
+  const nf = (value, fallback = 0) => numberForFormula(value, fallback);
+  const formula = (address, expression, fallbackValue = undefined) => {
+    const value = fallbackValue !== undefined
+      ? fallbackValue
+      : (Object.hasOwn(values, address) ? values[address] : cellValue[address]);
+    formulas[address] = dashboardFormulaSpec(expression, value);
+  };
+  const yearlySum = (row) => formula(`L${row}`, `SUM(G${row}:K${row})`);
+  const flatMonthly = (row) => {
+    formula(`D${row}`, `C${row}`);
+    formula(`E${row}`, `D${row}`);
+    formula(`G${row}`, `SUM(C${row}:E${row})*4`);
+    formula(`H${row}`, `G${row}`);
+    formula(`I${row}`, `H${row}`);
+    formula(`J${row}`, `I${row}`);
+    formula(`K${row}`, `J${row}`);
+    yearlySum(row);
+  };
+  const annualEscalation = (row, rate) => {
+    formula(`D${row}`, `C${row}`);
+    formula(`E${row}`, `D${row}`);
+    formula(`G${row}`, `SUM(C${row}:E${row})*4`);
+    formula(`H${row}`, `G${row}*(1+${nf(rate)})`);
+    formula(`I${row}`, `H${row}*(1+${nf(rate)})`);
+    formula(`J${row}`, `I${row}*(1+${nf(rate)})`);
+    formula(`K${row}`, `J${row}*(1+${nf(rate)})`);
+    yearlySum(row);
+  };
+
+  // Core feasibility logic: these formulas are direct Excel equivalents of
+  // calculateModel() in model.mjs. The dashboard model remains the source of truth.
+  formula("C3", "INFORMATION!B17");
+  formula("G3", "C3"); yearlySum(3);
+
+  formula("C4", `C6*${nf(advanced.stockPerSft, 1650)}`);
+  formula("D4", "C4"); formula("E4", "D4"); formula("G4", "E4");
+  formula("H4", "G4"); formula("I4", "H4"); formula("J4", "I4"); formula("K4", "J4"); yearlySum(4);
+
+  ["C","D","E"].forEach((col) => formula(`${col}5`, `(${col}4*30)/(${col}10*(1-${col}14))`));
+  ["G","H","I","J","K"].forEach((col) => formula(`${col}5`, `(${col}4*365)/(${col}10*(1-${col}14))`)); yearlySum(5);
+
+  formula("C6", "'Sales forecasting tools'!F3");
+  formula("D6", "C6"); formula("E6", "D6"); formula("G6", "E6"); formula("H6", "G6"); formula("I6", "H6"); formula("J6", "I6"); formula("K6", "J6"); yearlySum(6);
+
+  formula("C7", "C9/C8"); formula("D7", "D9/D8"); formula("E7", "E9/E8"); formula("G7", "C7");
+  formula("H7", "H9/H8"); formula("I7", "I9/I8"); formula("J7", "J9/J8"); formula("K7", "K9/K8"); yearlySum(7);
+
+  formula("C8", "INFORMATION!B11"); formula("D8", "C8"); formula("E8", "D8"); formula("G8", "G9/G7");
+  formula("H8", `G8*(1+${nf(advanced.basketGrowth, 0.04)})`);
+  formula("I8", `H8*(1+${nf(advanced.basketGrowth, 0.04)})`);
+  formula("J8", `I8*(1+${nf(advanced.basketGrowth, 0.04)})`);
+  formula("K8", `J8*(1+${nf(advanced.basketGrowth, 0.04)})`); yearlySum(8);
+
+  formula("C9", "INFORMATION!B8"); formula("D9", "D10/30"); formula("E9", "E10/30");
+  ["G","H","I","J","K"].forEach((col) => formula(`${col}9`, `${col}10/365`)); yearlySum(9);
+
+  formula("C10", "C9*30"); formula("D10", "C10"); formula("E10", "D10"); formula("G10", "SUM(C10:E10)*4");
+  formula("H10", `G10*(1+${nf(advanced.salesGrowthYear2, 0.12)})`);
+  formula("I10", `H10*(1+${nf(advanced.salesGrowthYear3, 0.10)})`);
+  formula("J10", `I10*(1+${nf(advanced.salesGrowthYear4, 0.10)})`);
+  formula("K10", `J10*(1+${nf(advanced.salesGrowthYear5, 0.08)})`); yearlySum(10);
+
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}12`, `${col}10-${col}13`)); yearlySum(12);
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}13`, `${col}10*${col}14`)); yearlySum(13);
+
+  formula("C14", "INFORMATION!B10"); formula("D14", "C14"); formula("E14", "D14"); formula("G14", "E14");
+  formula("H14", `G14+${nf(advanced.gpAnnualStep, 0.002)}`);
+  formula("I14", `H14+${nf(advanced.gpAnnualStep, 0.002)}`);
+  formula("J14", `I14+${nf(advanced.gpAnnualStep, 0.002)}`);
+  formula("K14", `J14+${nf(advanced.gpAnnualStep, 0.002)}`);
+  formula("L14", "SUM(G13:K13)/SUM(G10:K10)");
+
+  values.B15 = Number(data?.information?.otherIncomeRate || 0);
+  formula("B15", "INFORMATION!B13", Number(data?.information?.otherIncomeRate || 0));
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}15`, `$B$15*${col}10`)); yearlySum(15);
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}16`, `${col}15+${col}13`)); yearlySum(16);
+
+  formula("B18", "INFORMATION!B7", Number(model?.inputs?.gpShare || 0));
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}18`, `$B$18*${col}16`)); yearlySum(18);
+  yearlySum(19);
+
+  values.B20 = ""; values.B21 = ""; values.B22 = "";
+  formula("C20", "SUM(INFORMATION!G9:G20)"); annualEscalation(20, advanced.staffEscalation ?? 0.08);
+  formula("C21", "SUM(INFORMATION!G7:G8)"); annualEscalation(21, advanced.staffEscalation ?? 0.08);
+  formula("C22", "SUM(INFORMATION!G21:G22)"); annualEscalation(22, advanced.staffEscalation ?? 0.08);
+
+  formula("C23", `(C3*${nf(advanced.outletDepreciablePortion, 0.7)})/${nf(advanced.outletDepreciationMonths, 60)}`); flatMonthly(23);
+
+  values.B24 = Number(advanced.consumptionRate ?? 0.0065);
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}24`, `$B$24*${col}10`)); yearlySum(24);
+
+  values.C25 = Number(advanced.electricityMonthly || 0); flatMonthly(25);
+
+  const wastageRate = Number(advanced.productWastageRate ?? 0.0058);
+  values.B26 = String(data?.project?.pnp || "").trim().toUpperCase() === "Y" ? wastageRate : 0;
+  formula("B26", `IF(UPPER(INFORMATION!B14)="Y",${nf(wastageRate)},0)`, Number(values.B26));
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}26`, `$B$26*${col}10`)); yearlySum(26);
+
+  values.C27 = Number(advanced.maintenanceMonthly || 0); flatMonthly(27);
+  values.B28 = ""; values.C28 = Number(advanced.securityCostMonthly || 0); flatMonthly(28);
+  values.B29 = ""; values.C29 = Number(advanced.generatorMonthly || 0); flatMonthly(29);
+  values.B30 = ""; values.C30 = Number(advanced.cleaningMonthly || 0); flatMonthly(30);
+
+  values.C31 = Number(advanced.outletOpexInitial ?? 25000);
+  values.D31 = Number(advanced.outletOpexRecurringMonthly ?? 5000);
+  formula("E31", "D31"); formula("G31", "C31+E31*11");
+  formula("H31", `E31*12*(1+${nf(advanced.outletOpexEscalation, 0.05)})`);
+  formula("I31", `H31*(1+${nf(advanced.outletOpexEscalation, 0.05)})`);
+  formula("J31", `I31*(1+${nf(advanced.outletOpexEscalation, 0.05)})`);
+  formula("K31", `J31*(1+${nf(advanced.outletOpexEscalation, 0.05)})`); yearlySum(31);
+
+  values.B32 = "";
+  formula("C32", `IF(INFORMATION!B18="Y",${nf(advanced.cityChargeOutsideDhakaMonthly, 6500)},${nf(advanced.cityChargeDhakaMonthly, 4500)})`);
+  flatMonthly(32);
+
+  values.B33 = Number(advanced.membershipDiscountRate ?? 0.0038);
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}33`, `$B$33*${col}10`)); yearlySum(33);
+
+  values.C34 = Number(advanced.insuranceMonthly ?? 2500); flatMonthly(34);
+  values.C35 = Number(advanced.promotionalMonthly || 0); flatMonthly(35);
+  values.B36 = ""; values.C36 = Number(advanced.iceMonthly || 0); flatMonthly(36);
+
+  values.B37 = Number(advanced.denominationRate ?? 0.0003);
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}37`, `$B$37*${col}10`)); yearlySum(37);
+  values.B38 = Number(advanced.creditCardRate ?? 0.003);
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}38`, `$B$38*${col}10`)); yearlySum(38);
+
+  values.C39 = Number(advanced.conveyanceMonthly ?? 4000); annualEscalation(39, advanced.officeCostEscalation ?? 0.05);
+  values.C40 = Number(advanced.printingMonthly ?? 2500); annualEscalation(40, advanced.officeCostEscalation ?? 0.05);
+  values.C41 = Number(advanced.entertainmentMonthly ?? 1000); annualEscalation(41, advanced.officeCostEscalation ?? 0.05);
+
+  const stockFallback = Number(advanced.stockWriteOffRate ?? 0.0048);
+  const stockRate = Number((model?.rows || []).find((row) => row.label === "Stock write off (Provision)")?.rate ?? stockFallback);
+  values.B42 = stockRate;
+  formula("B42", `IFERROR(VLOOKUP('Sales forecasting tools'!$N$21,'Sales forecasting tools'!$AB:$AE,4,0),${nf(stockFallback)})`, stockRate);
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}42`, `$B$42*${col}10`)); yearlySum(42);
+
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}44`, `SUM(${col}18:${col}42)`)); yearlySum(44);
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}46`, `${col}16-${col}44`)); formula("L46", "L16-L44");
+
+  values.B48 = Number(advanced.outletFinanceRate ?? 0.14);
+  const depPortion = nf(advanced.outletDepreciablePortion, 0.7);
+  const freeDays = nf(advanced.stockFreeHoldingDays, 55);
+  ["C","D","E"].forEach((col) => formula(`${col}48`, `($C$3*${depPortion})*$B$48/12+IF(${col}5>${freeDays},(${col}5-${freeDays})*${col}9*(1-${col}14)*$B$48/12,0)`));
+  formula("G48", "C48*12");
+  ["H","I","J","K"].forEach((col) => formula(`${col}48`, `($C$3*${depPortion})*$B$48+IF(${col}5>${freeDays},(${col}5-${freeDays})*${col}9*(1-${col}14)*$B$48,0)`)); yearlySum(48);
+
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}50`, `${col}46-${col}48`)); yearlySum(50);
+
+  formula("C52", "Master!C26"); formula("D52", "C52"); formula("E52", "D52"); formula("G52", "SUM(C52:E52)*4");
+  formula("H52", `G52*(1+${nf(advanced.transportEscalation, 0.05)})`);
+  formula("I52", `H52*(1+${nf(advanced.transportEscalation, 0.05)})`);
+  formula("J52", `I52*(1+${nf(advanced.transportEscalation, 0.05)})`);
+  formula("K52", `J52*(1+${nf(advanced.transportEscalation, 0.05)})`); yearlySum(52);
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}54`, `${col}50-${col}52`)); yearlySum(54);
+
+  formula("C57", "INFORMATION!B19"); formula("G57", "C57"); yearlySum(57);
+  formula("C58", "INFORMATION!B16"); formula("G58", "C58"); yearlySum(58);
+  values.C59 = Number(advanced.securityDeposit || 0); formula("G59", "C59"); yearlySum(59);
+
+  formula("B60", "B18", Number(model?.inputs?.gpShare || 0));
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}60`, `${col}18`)); yearlySum(60);
+
+  formula("C62", 'IF(UPPER(Master!C4)="FR",INFORMATION!B15,0)'); formula("D62", "C62"); formula("E62", "D62"); formula("G62", "SUM(C62:E62)*4");
+  const rentStart = Math.max(2, Math.min(5, Number(advanced.rentEscalationStartsYear ?? 4)));
+  const rentRate = nf(advanced.rentEscalation, 0.10);
+  [["H",2,"G"],["I",3,"H"],["J",4,"I"],["K",5,"J"]].forEach(([col, year, prev]) => {
+    formula(`${col}62`, Number(year) === rentStart ? `${prev}62*(1+${rentRate})` : `${prev}62`);
+  }); yearlySum(62);
+
+  values.B63 = Number(advanced.rentVatRate ?? 0.15);
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}63`, `${col}62*$B$63`)); yearlySum(63);
+
+  formula("C64", `IF(UPPER(Master!C4)="FR",C57/${nf(advanced.franchiseDepreciationMonths, 120)},0)`); flatMonthly(64);
+
+  values.B65 = Number(advanced.franchiseFinanceRate ?? 0.09);
+  formula("C65", 'IF(UPPER(Master!C4)="FR",($C$57+$C$58+$C$59)*$B$65/12,0)'); flatMonthly(65);
+
+  values.B68 = "";
+  values.C68 = String(data?.project?.frOwn || "").trim().toUpperCase() === "FR" ? Number(model?.inputs?.electricityMonthly || 0) : 0;
+  formula("D68", "C68"); formula("E68", "D68"); formula("G68", "SUM(C68:E68)*4");
+  formula("H68", `G68*(1+${nf(advanced.franchiseElectricityEscalation, 0.03)})`);
+  formula("I68", `H68*(1+${nf(advanced.franchiseElectricityEscalation, 0.03)})`);
+  formula("J68", `I68*(1+${nf(advanced.franchiseElectricityEscalation, 0.03)})`);
+  formula("K68", `J68*(1+${nf(advanced.franchiseElectricityEscalation, 0.03)})`); yearlySum(68);
+
+  const frMonthly = (row, value) => {
+    values[`C${row}`] = String(data?.project?.frOwn || "").trim().toUpperCase() === "FR" ? Number(value || 0) : 0;
+    flatMonthly(row);
+  };
+  frMonthly(69, advanced.franchiseMaintenanceMonthly);
+  frMonthly(70, advanced.franchiseGeneratorMonthly);
+  frMonthly(71, advanced.franchiseIceMonthly);
+  frMonthly(72, advanced.franchiseServiceMonthly);
+
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}73`, `${col}62+${col}63+${col}68+${col}69+${col}70+${col}71+${col}72`)); yearlySum(73);
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}75`, `${col}60-${col}73`)); yearlySum(75);
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}77`, `${col}73+${col}64+${col}65`)); yearlySum(77);
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}79`, `${col}60-${col}77`)); yearlySum(79);
+  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}81`, `${col}79+${col}50`)); yearlySum(81);
+
+  // Hidden legacy rows are not part of the dashboard report and are no longer
+  // used in the return formulas. They remain only to preserve template structure.
+  ["C","D","E","G","H","I","J","K","L"].forEach((col) => { values[`${col}66`] = 0; values[`${col}67`] = 0; });
+
+  const initialInvestment = Number(model?.inputs?.initialInvestment || 0);
+  values.F84 = -initialInvestment;
+  formula("F84", "-SUM(C57:C59)", -initialInvestment);
+  const yearCols = ["G","H","I","J","K"];
+  (model?.metrics?.yearlyCashFlow || []).forEach((value, index) => { values[`${yearCols[index]}84`] = Number(value || 0); });
+  formula("G84", "G75-G65"); formula("H84", "H75-H65"); formula("I84", "I75-I65"); formula("J84", "J75-J65");
+  formula("K84", `K75-K65+${nf(advanced.terminalRecovery, 3000000)}`);
+
+  (model?.metrics?.cumulativeCashFlow || []).forEach((value, index) => { values[`${yearCols[index]}85`] = Number(value || 0); });
+  formula("G85", "F84+G84"); formula("H85", "G85+H84"); formula("I85", "H85+I84"); formula("J85", "I85+J84"); formula("K85", "J85+K84");
+
+  yearCols.forEach((col, index) => {
+    const roiValue = initialInvestment ? Number(model?.metrics?.yearlyCashFlow?.[index] || 0) / initialInvestment : 0;
+    values[`${col}86`] = roiValue;
+    formula(`${col}86`, `IFERROR(${col}84/SUM($C$57:$C$59),0)`, roiValue);
+  });
+
+  values.B88 = Number(model?.metrics?.discountRate || 0);
+  values.B89 = Number(model?.metrics?.npv || 0);
+  values.B90 = Number(model?.metrics?.roi || 0);
+  values.B91 = model?.metrics?.irr === null || model?.metrics?.irr === undefined ? "N/A" : Number(model.metrics.irr);
+  values.B92 = model?.metrics?.payback === null || model?.metrics?.payback === undefined ? "Not reached" : Number(model.metrics.payback);
+  formula("B89", "NPV(B88,G84:K84)+F84", values.B89);
+  formula("B90", "IFERROR(B89/SUM(C57:C59),0)", values.B90);
+  formula("B91", 'IFERROR(IRR(F84:K84),"N/A")', values.B91);
+  formula("B92", 'IF(SUM(C57:C59)=0,0,IF(G85>=0,G85/G84,IF(H85>=0,1-G85/H84,IF(I85>=0,2-H85/I84,IF(J85>=0,3-I85/J84,IF(K85>=0,4-J85/K84,"Not reached"))))))', values.B92);
+
+  return { values, formulas };
+}
+
+export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt) {
   const cfbApi = getCfbApi();
   const zip = cfbApi.read(asUint8Array(templateBuffer), { type: "array" });
   const { paths, workbookEntry, workbookXml } = worksheetPaths(zip);
@@ -1032,7 +1357,9 @@ function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt) {
     C6: data?.project?.density ?? "",
     C7: data?.project?.incomeLevel ?? "",
     C8: Number(data?.project?.longFeet || 0),
-    C9: Number(data?.project?.projectedDailySales || 0),
+    // Resolved daily sales is authoritative. This also keeps category mix and
+    // Information B8/B9 aligned when the dashboard uses a monthly-sales override.
+    C9: Number(model?.inputs?.dailySales ?? data?.project?.projectedDailySales ?? 0),
     C10: Number(data?.project?.monthlyRent || 0),
     C11: Number(data?.project?.advance || 0),
     C12: Number(staffById(data, "om").quantity || 0),
@@ -1058,6 +1385,7 @@ function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt) {
 
   const forecastValues = {
     C21: data?.project?.division ?? "",
+    C24: model?.dhakaClassification ?? "Dhaka",
     E6: data?.project?.locationType ?? "",
     F7: data?.forecast?.marketNearby ?? "",
     F8: Number(data?.forecast?.avgDepartmentalSales || 0),
@@ -1074,12 +1402,20 @@ function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt) {
     C32: optionalWorkbookValue(data?.information?.footfallOverride),
   };
   patchWorksheetValues(zip, paths.get("Sales forecasting tools"), forecastValues);
+  patchWorksheetFormulas(zip, paths.get("Sales forecasting tools"), {
+    C24: dashboardFormulaSpec(
+      'IF(OR(LOWER(TRIM(C21))="dhaka",SUBSTITUTE(LOWER(TRIM(C21))," ","")="dhakagbud"),"Dhaka","Out of Dhaka")',
+      model?.dhakaClassification ?? "Dhaka",
+    ),
+  });
 
   const informationValues = {
     B7: Number(model?.inputs?.gpShare ?? data?.reference?.autoGpShareFr ?? 0),
-    B9: optionalWorkbookValue(data?.project?.monthlySalesOverride),
+    // Preserve B9=B8*30 so daily and monthly sales are always one rule.
+    B9: undefined,
     B13: Number(data?.information?.otherIncomeRate || 0),
     B17: optionalWorkbookValue(data?.information?.cepValueOverride),
+    B18: model?.inputs?.areaOutsideDhaka ?? "N",
     B19: optionalWorkbookValue(data?.information?.decorationCostOverride),
     F7: Number(staffById(data, "om").salary || 0),
     F8: Number(staffById(data, "icmo").salary || 0),
@@ -1097,42 +1433,17 @@ function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt) {
     F22: Number(staffById(data, "cleaner").salary || 0),
   };
   patchWorksheetValues(zip, paths.get("INFORMATION"), informationValues);
+  patchWorksheetFormulas(zip, paths.get("INFORMATION"), {
+    B18: dashboardFormulaSpec(
+      'IF(OR(LOWER(TRIM(\'Sales forecasting tools\'!C21))="dhaka",SUBSTITUTE(LOWER(TRIM(\'Sales forecasting tools\'!C21))," ","")="dhakagbud"),"N","Y")',
+      model?.inputs?.areaOutsideDhaka ?? "N",
+    ),
+  });
 
-  const advanced = data?.advanced || {};
-  const feasibilityValues = {
-    B24: Number(advanced.consumptionRate ?? 0.0065),
-    C25: Number(advanced.electricityMonthly || 0),
-    D25: Number(advanced.electricityMonthly || 0),
-    E25: Number(advanced.electricityMonthly || 0),
-    C27: Number(advanced.maintenanceMonthly || 0),
-    D27: Number(advanced.maintenanceMonthly || 0),
-    E27: Number(advanced.maintenanceMonthly || 0),
-    C29: Number(advanced.generatorMonthly || 0),
-    D29: Number(advanced.generatorMonthly || 0),
-    E29: Number(advanced.generatorMonthly || 0),
-    C31: Number(advanced.outletOpexInitial ?? 25000),
-    D31: Number(advanced.outletOpexRecurringMonthly ?? 5000),
-    B33: Number(advanced.membershipDiscountRate ?? 0.0038),
-    C34: Number(advanced.insuranceMonthly ?? 2500),
-    C35: Number(advanced.promotionalMonthly || 0),
-    B37: Number(advanced.denominationRate ?? 0.0003),
-    B38: Number(advanced.creditCardRate ?? 0.003),
-    C39: Number(advanced.conveyanceMonthly ?? 4000),
-    C40: Number(advanced.printingMonthly ?? 2500),
-    C41: Number(advanced.entertainmentMonthly ?? 1000),
-    B48: Number(advanced.outletFinanceRate ?? 0.14),
-    C59: Number(advanced.securityDeposit || 0),
-    B63: Number(advanced.rentVatRate ?? 0.15),
-    B65: Number(advanced.franchiseFinanceRate ?? 0.09),
-    C68: optionalWorkbookValue(advanced.franchiseElectricityMonthlyOverride),
-    G67: Number(advanced.terminalRecovery ?? 3000000),
-    C69: Number(advanced.franchiseMaintenanceMonthly ?? 2000),
-    C70: Number(advanced.franchiseGeneratorMonthly ?? 2000),
-    C71: Number(advanced.franchiseIceMonthly || 0),
-    C72: Number(advanced.franchiseServiceMonthly || 0),
-    B88: Number(advanced.discountRate ?? 0.09),
-  };
-  patchWorksheetValues(zip, paths.get("AUTO GENERATED FEASIBILITY"), feasibilityValues);
+  const feasibilityPatch = buildDashboardFeasibilityPatch(data, model);
+  patchWorksheetValues(zip, paths.get("AUTO GENERATED FEASIBILITY"), feasibilityPatch.values);
+  patchWorksheetFormulas(zip, paths.get("AUTO GENERATED FEASIBILITY"), feasibilityPatch.formulas);
+  hideWorksheetRows(zip, paths.get("AUTO GENERATED FEASIBILITY"), [66, 67]);
 
   REPORT_SHEET_NAMES.forEach((name) => patchWorksheetFooter(zip, paths.get(name), exportedAt));
   writeXmlContent(
