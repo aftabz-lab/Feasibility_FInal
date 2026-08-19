@@ -954,9 +954,24 @@ function patchWorksheetFooter(zip, path, exportedAt) {
     xml = xml.replace(selfClosingPattern, `<headerFooter>${oddFooter}</headerFooter>`);
   } else {
     const block = `<headerFooter>${oddFooter}</headerFooter>`;
-    xml = /<pageMargins\b/i.test(xml)
-      ? xml.replace(/<pageMargins\b/i, `${block}<pageMargins`)
-      : xml.replace(/<\/worksheet>/i, `${block}</worksheet>`);
+
+    // OOXML worksheet child order is strict. headerFooter belongs AFTER
+    // pageSetup (and pageMargins), not before pageMargins. Putting it before
+    // pageMargins creates a workbook that browsers can save but desktop Excel
+    // opens with "We found a problem with some content" and repairs.
+    // Insert after the latest available print-layout element so all original
+    // formulas, validations, drawings and relationships remain untouched.
+    if (/<pageSetup\b[^>]*\/>/i.test(xml)) {
+      xml = xml.replace(/(<pageSetup\b[^>]*\/>)/i, `$1${block}`);
+    } else if (/<pageSetup\b[^>]*>[\s\S]*?<\/pageSetup>/i.test(xml)) {
+      xml = xml.replace(/(<pageSetup\b[^>]*>[\s\S]*?<\/pageSetup>)/i, `$1${block}`);
+    } else if (/<pageMargins\b[^>]*\/>/i.test(xml)) {
+      xml = xml.replace(/(<pageMargins\b[^>]*\/>)/i, `$1${block}`);
+    } else if (/<pageMargins\b[^>]*>[\s\S]*?<\/pageMargins>/i.test(xml)) {
+      xml = xml.replace(/(<pageMargins\b[^>]*>[\s\S]*?<\/pageMargins>)/i, `$1${block}`);
+    } else {
+      xml = xml.replace(/<\/worksheet>/i, `${block}</worksheet>`);
+    }
   }
   writeXmlContent(entry, xml);
 }

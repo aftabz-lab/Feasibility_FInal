@@ -14,7 +14,7 @@ import {
   openedByOptions,
   salesGivenByOptions,
 } from "./model.mjs";
-import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js";
+import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=20260819-rulesfix1";
 import { downloadFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js";
 
 const app = document.querySelector("#app");
