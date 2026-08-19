@@ -15,305 +15,12 @@ const COLORS = {
   white: "FFFFFF",
   red: "FFC7CE",
   redDark: "9C0006",
-  redText: "C00000",
-  scoreGreen: "92D050",
 };
 
 const MONEY_FORMAT = '#,##0;[Red](#,##0);-';
 const NUMBER_FORMAT = '#,##0.0;[Red](#,##0.0);-';
 const INTEGER_FORMAT = '#,##0;[Red](#,##0);-';
 const PERCENT_FORMAT = '0.0%;[Red](0.0%);-';
-// ---------------------------------------------------------------------------
-// Template mode for "Download Excel with Rules".
-//
-// Instead of rebuilding the three visible sheets from computed numbers, this
-// writes ONLY the input cells into the loaded master workbook and asks Excel to
-// recalculate on open. Every formula in the file survives, so each cell in the
-// visible sheets shows its real rule in the formula bar, and the workbook keeps
-// the exact layout of the master template.
-//
-// The map below mirrors what extractFromWorkbook() reads, but points at the true
-// INPUT cells. Most of the "Sales forecasting tools" cells are formulas fed by
-// the Master sheet (C20 = Master!C2, F3 = Master!C5, ...), so writing them there
-// would destroy the link - the value is written to Master instead.
-// ---------------------------------------------------------------------------
-
-// [staff id, INFORMATION row (salary in F), Master row holding the quantity].
-// INFORMATION!E7 is "=Master!C12", E12 is "=Master!C15" and so on - the offset is
-// not uniform, so the mapping is spelled out rather than computed.
-const STAFF_ROWS = [
-  ["om", 7, 12], ["icmo", 8, 13], ["duty", 9, 14], ["cg", 12, 15],
-  ["commodity", 13, 16], ["protein", 14, 17], ["perishables", 15, 18], ["gml", 16, 19],
-  ["pos", 17, 20], ["porter", 18, 21], ["bsm", 19, 22], ["bkstr", 20, 23],
-  ["security", 21, 24], ["cleaner", 22, 25],
-];
-
-const ASSESSMENT_CELLS = [
-  ["locationType", "F6"],
-  ["marketNearby", "F7"],
-  ["avgDepartmentalSales", "F8"],
-  ["roadStatus", "F9"],
-  ["worshipCount", "F10"],
-  ["educationCount", "F11"],
-  ["bankOfficeCount", "F12"],
-  ["competitorAvgSales", "F13"],
-  ["publicTransit", "F14"],
-  ["signboardVisibility", "F16"],
-  ["hotelRestaurantHospitalCount", "F17"],
-];
-
-function writeCell(worksheet, address, value) {
-  if (!worksheet || value === undefined || value === null || value === "") return;
-  if (typeof value === "number" && !Number.isFinite(value)) return;
-  const cell = worksheet.getCell(address);
-  const existing = cell.value;
-  // Never overwrite a formula: that is exactly the "rule" the user wants kept.
-  if (existing && typeof existing === "object" && (existing.formula || existing.sharedFormula)) return;
-  cell.value = value;
-}
-
-
-// The master template already carries its own approval form on
-// "AUTO GENERATED FEASIBILITY": role/name/designation at rows 95-97 (first row of
-// four) and 103-105 (second row of three), with the signing lines drawn between
-// them. These slots mirror that layout - column is 0-indexed, labelRow is 1-based.
-// lineFrom/lineTo are 1-based columns for the signing rule, taken from the
-// straight-connector positions in the master template. ExcelJS cannot preserve
-// those connector shapes through a load/save cycle (a pristine round-trip loses
-// them too), so the line is redrawn as a cell border on the row above the label.
-const TEMPLATE_SIGNATURE_SLOTS = [
-  { column: 0, labelRow: 95, lineFrom: 1, lineTo: 2 },
-  { column: 2, labelRow: 95, lineFrom: 3, lineTo: 5 },
-  { column: 6, labelRow: 95, lineFrom: 7, lineTo: 9 },
-  { column: 9, labelRow: 95, lineFrom: 10, lineTo: 12 },
-  { column: 0, labelRow: 103, lineFrom: 1, lineTo: 2 },
-  { column: 3, labelRow: 103, lineFrom: 4, lineTo: 6 },
-  { column: 9, labelRow: 103, lineFrom: 10, lineTo: 12 },
-];
-
-function clearWorksheetImages(worksheet) {
-  if (!worksheet) return;
-  // Drop the template's own signature images so ticking a box replaces them
-  // instead of stacking a second signature on top.
-  if (Array.isArray(worksheet._media)) worksheet._media.length = 0;
-}
-
-async function applyTemplateSignatures(workbook, model, assets) {
-  const sheet = workbook.getWorksheet("AUTO GENERATED FEASIBILITY");
-  if (!sheet) return;
-  clearWorksheetImages(sheet);
-  clearTemplateSignatureRows(sheet);
-
-  const strip = await renderSignatureStripImage(model, assets);
-  if (!strip?.base64) return;
-
-  const imageId = workbook.addImage({ base64: strip.base64, extension: "png" });
-  // Anchor across the full report width, starting immediately under row 94.
-  sheet.addImage(imageId, {
-    tl: { nativeCol: 0, nativeColOff: 0, nativeRow: 94, nativeRowOff: 0 },
-    br: { nativeCol: 12, nativeColOff: 0, nativeRow: 106, nativeRowOff: 0 },
-    editAs: "oneCell",
-  });
-}
-
-function columnLetter(oneBasedColumn) {
-  let result = "";
-  let value = oneBasedColumn;
-  while (value > 0) {
-    const remainder = (value - 1) % 26;
-    result = String.fromCharCode(65 + remainder) + result;
-    value = Math.floor((value - 1) / 26);
-  }
-  return result;
-}
-
-// ---------------------------------------------------------------------------
-// Signature strip image.
-//
-// The template's approval form spreads signatures across merged cells, and Excel
-// anchors them to cell edges, so ink never lines up with the captions the way it
-// does in the PDF. Instead of fighting that, the whole approval block is drawn
-// once on a canvas - same 4-then-3 layout, same dashed rules, same ordering as
-// drawSignatureBlocks() in pdf-exporter.js - and the resulting PNG is dropped
-// into the sheet as a single picture. One image cannot drift out of alignment.
-// ---------------------------------------------------------------------------
-
-const STRIP_SCALE = 2;              // draw at 2x for a crisp image
-const STRIP_WIDTH = 780;            // points, close to the PDF's usable width
-const STRIP_ROW_HEIGHT = 118;
-const STRIP_TOP_PAD = 10;
-
-function loadImageElement(dataUrl) {
-  return new Promise((resolve) => {
-    const image = new Image();
-    image.onload = () => resolve(image);
-    image.onerror = () => resolve(null);
-    image.src = dataUrl;
-  });
-}
-
-async function renderSignatureStripImage(model, assets) {
-  if (typeof document === "undefined" || typeof document.createElement !== "function") return null;
-  if (typeof Image !== "function") return null;
-
-  const groups = signatureRowGroups(model?.signatories || []);
-  if (groups.length === 0) return null;
-
-  const canvas = document.createElement("canvas");
-  const height = STRIP_TOP_PAD * 2 + groups.length * STRIP_ROW_HEIGHT;
-  canvas.width = STRIP_WIDTH * STRIP_SCALE;
-  canvas.height = height * STRIP_SCALE;
-  const context = canvas.getContext("2d");
-  if (!context) return null;
-  context.scale(STRIP_SCALE, STRIP_SCALE);
-  context.fillStyle = "#ffffff";
-  context.fillRect(0, 0, STRIP_WIDTH, height);
-  context.textBaseline = "alphabetic";
-
-  for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
-    const group = groups[groupIndex];
-    const top = STRIP_TOP_PAD + groupIndex * STRIP_ROW_HEIGHT;
-    const blockWidth = STRIP_WIDTH / group.length;
-    const lineWidth = Math.min(190, blockWidth - 24);
-    const lineY = top + 56;
-
-    for (let index = 0; index < group.length; index += 1) {
-      const person = group[index];
-      const blockX = index * blockWidth;
-      const centreX = blockX + blockWidth / 2;
-      const lineX = centreX - lineWidth / 2;
-
-      // dashed signing rule
-      context.save();
-      context.strokeStyle = "#9fb3c8";
-      context.lineWidth = 0.8;
-      if (context.setLineDash) context.setLineDash([3, 2]);
-      context.beginPath();
-      context.moveTo(lineX, lineY);
-      context.lineTo(lineX + lineWidth, lineY);
-      context.stroke();
-      context.restore();
-
-      // ink, only when ticked in the Signature manager
-      if (person.includeInPdf === true) {
-        const asset = getSignatureAsset(assets, person.signatureId);
-        if (asset) {
-          const base64 = await toBase64(asset);
-          if (base64) {
-            if (asset.transparentBase64 === undefined) {
-              asset.transparentBase64 = await withTransparentBackground(base64, asset.extension);
-            }
-            const source = asset.transparentBase64
-              ? `data:image/png;base64,${asset.transparentBase64}`
-              : `data:image/${asset.extension || "png"};base64,${base64}`;
-            const image = await loadImageElement(source);
-            if (image && image.width && image.height) {
-              const maxWidth = Math.min(lineWidth, 170);
-              const maxHeight = 60;
-              const ratio = Math.min(maxWidth / image.width, maxHeight / image.height);
-              const drawWidth = image.width * ratio;
-              const drawHeight = image.height * ratio;
-              // sit the ink on the rule, crossing it slightly
-              context.drawImage(image, centreX - drawWidth / 2, lineY - drawHeight * 0.78, drawWidth, drawHeight);
-            }
-          }
-        }
-      }
-
-      context.fillStyle = "#5b7183";
-      context.font = "9px Helvetica, Arial, sans-serif";
-      context.textAlign = "center";
-      context.fillText(String(person.role || ""), centreX, lineY + 18);
-
-      context.fillStyle = "#12263a";
-      context.font = "bold 10px Helvetica, Arial, sans-serif";
-      context.fillText(String(person.name || ""), centreX, lineY + 32);
-
-      context.fillStyle = "#5b7183";
-      context.font = "8px Helvetica, Arial, sans-serif";
-      context.fillText(String(person.designation || ""), centreX, lineY + 45);
-    }
-  }
-
-  const dataUrl = canvas.toDataURL("image/png");
-  return { base64: dataUrl.split(",")[1] || null, width: STRIP_WIDTH, height };
-}
-
-// Wipe the template's own approval block (rows 94-106) so the strip image is the
-// only signature content on the sheet. The rows are cleared rather than deleted:
-// deleting would shift every row beneath and break formulas that reference them.
-function clearTemplateSignatureRows(worksheet, firstRow = 94, lastRow = 106) {
-  if (!worksheet) return;
-  for (let rowNumber = firstRow; rowNumber <= lastRow; rowNumber += 1) {
-    const row = worksheet.getRow(rowNumber);
-    for (let column = 1; column <= 14; column += 1) {
-      const cell = row.getCell(column);
-      // Formulas are cleared here too. The only ones in this range are the
-      // template's caption links (C96 = Master!C27 and so on) - display text that
-      // the strip image now supplies. Nothing downstream reads these cells.
-      cell.value = null;
-      cell.border = {};
-      cell.fill = { type: "pattern", pattern: "none" };
-    }
-  }
-  clearMerges(worksheet);
-}
-
-function applyInputsToTemplate(workbook, data) {
-  const master = workbook.getWorksheet("Master");
-  const forecast = workbook.getWorksheet("Sales forecasting tools");
-  const information = workbook.getWorksheet("INFORMATION");
-  const project = data.project || {};
-  const forecastInputs = data.forecast || {};
-
-  // --- Master sheet: the real input column ---
-  writeCell(master, "C2", project.locationArea);
-  writeCell(master, "C3", project.pnp);
-  writeCell(master, "C4", project.frOwn);
-  writeCell(master, "C5", Number(project.sft) || 0);
-  writeCell(master, "C6", project.density);
-  writeCell(master, "C7", project.incomeLevel);
-  writeCell(master, "C8", Number(project.longFeet) || 0);
-  writeCell(master, "C9", Number(project.projectedDailySales) || 0);
-  writeCell(master, "C10", Number(project.monthlyRent) || 0);
-  writeCell(master, "C11", Number(project.advance) || 0);
-  writeCell(master, "C26", Number(project.outboundTransport) || 0);
-  writeCell(master, "C27", project.salesGivenBy);
-  writeCell(master, "C28", project.openedBy);
-  writeCell(master, "C30", Number(project.existingOutlets) || 0);
-
-  // --- Sales forecasting tools: Division and the assessment answers ---
-  writeCell(forecast, "C21", project.division);
-  ASSESSMENT_CELLS.forEach(([key, address]) => {
-    const value = key === "locationType" ? project.locationType : forecastInputs[key];
-    if (value === undefined || value === null || value === "") return;
-    writeCell(forecast, address, value);
-  });
-
-  // --- INFORMATION: other income and the manpower table ---
-  writeCell(information, "B13", Number(data.information?.otherIncomeRate) || 0);
-  STAFF_ROWS.forEach(([id, informationRow, masterRow]) => {
-    const item = (data.staff || []).find((staff) => staff.id === id);
-    if (!item) return;
-    // Column E is a formula fed from Master, so the quantity goes to its source.
-    writeCell(master, `C${masterRow}`, Number(item.quantity) || 0);
-    writeCell(information, `F${informationRow}`, Number(item.salary) || 0);
-  });
-
-  // Decoration cost is a formula (MAX(1500000, SFT*1000 ...)). Only stamp a value
-  // when the user deliberately overrode it, otherwise leave the rule in place.
-  const decorationOverride = data.information?.decorationCostOverride;
-  if (decorationOverride !== null && decorationOverride !== undefined && decorationOverride !== "") {
-    const cell = information?.getCell("B19");
-    if (cell) cell.value = Number(decorationOverride);
-  }
-
-  // Force a full recalculation when the file is opened so every formula refreshes
-  // against the new inputs rather than showing the template's cached results.
-  workbook.calcProperties = workbook.calcProperties || {};
-  workbook.calcProperties.fullCalcOnLoad = true;
-}
-
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
 function rgb(hex) {
@@ -329,85 +36,49 @@ function border(style = "thin", color = COLORS.line) {
   };
 }
 
-// Loading the source workbook as a template keeps every merge definition that
-// already existed in the file. spliceRows() clears cell VALUES but never clears
-// those merges, so re-merging the same ranges throws "Cannot merge already
-// merged cells". These two helpers make the rebuild idempotent.
-function clearMerges(worksheet) {
-  if (!worksheet) return;
-  const merges = worksheet._merges || {};
-  for (const key of Object.keys(merges)) {
-    try {
-      worksheet.unMergeCells(key);
-    } catch (error) {
-      // Range was already released - nothing to undo.
-    }
-  }
-}
-
-// Reusing a loaded worksheet keeps stale internal state that survives
-// spliceRows(): cached cell addresses (which end up one row out and make Excel
-// report "we found a problem with some content"), old merge definitions, shared
-// formula masters, and every image already anchored to the sheet - the cause of
-// duplicated/scattered signatures. Dropping the sheet and recreating it under the
-// same name clears all of that at once. Cross-sheet formulas reference sheets by
-// NAME, so the hidden dependency sheets keep working.
-function recreateSheet(workbook, name, options) {
-  const existing = workbook.getWorksheet(name);
-  if (existing) {
-    try {
-      workbook.removeWorksheet(existing.id);
-    } catch (error) {
-      // Fall back to clearing in place if the sheet cannot be removed.
-      resetSheet(existing);
-      return existing;
-    }
-  }
-  return workbook.addWorksheet(name, options);
-}
-
-function resetSheet(worksheet) {
-  if (!worksheet) return;
-  // spliceRows() does not reliably drop every cached cell. Any cell left holding
-  // a shared-formula master or clone will break workbook.xlsx.writeBuffer() with
-  // "Shared Formula master must exist above and or left of clone" as soon as we
-  // overwrite a master with a plain value. These sheets are rebuilt from scratch,
-  // so clear their contents outright before rebuilding.
-  worksheet.eachRow({ includeEmpty: true }, (row) => {
-    row.eachCell({ includeEmpty: true }, (cell) => {
-      try {
-        cell.value = null;
-      } catch (error) {
-        // Cell cannot be cleared - leave it and continue.
-      }
-    });
-  });
-  if (worksheet.rowCount > 0) worksheet.spliceRows(1, worksheet.rowCount);
-  clearMerges(worksheet);
-}
-
-function safeMerge(worksheet, ...args) {
-  try {
-    worksheet.mergeCells(...args);
-  } catch (error) {
-    // Unmerge whatever occupies the target range, then merge once more.
-    try {
-      worksheet.unMergeCells(...args);
-      worksheet.mergeCells(...args);
-    } catch (retryError) {
-      // Leave the cells unmerged rather than aborting the whole export.
-    }
-  }
-}
-
 function applyTitle(worksheet, range, title) {
-  safeMerge(worksheet, range);
+  worksheet.mergeCells(range);
   const cell = worksheet.getCell(range.split(":")[0]);
   cell.value = title;
   cell.font = { name: "Aptos Display", size: 15, bold: true, color: rgb(COLORS.black) };
   cell.fill = { type: "pattern", pattern: "solid", fgColor: rgb(COLORS.white) };
   cell.alignment = { horizontal: "center", vertical: "middle" };
   cell.border = border("medium", COLORS.black);
+}
+
+function formatExportTimestamp(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = date.getHours();
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const seconds = String(date.getSeconds()).padStart(2, "0");
+  const suffix = hours >= 12 ? "PM" : "AM";
+  const hour = hours % 12 || 12;
+  return `${day} ${months[date.getMonth()]} ${date.getFullYear()}, ${hour}:${minutes}:${seconds} ${suffix}`;
+}
+
+function addExportTimestampRow(worksheet, range, exportedAt) {
+  worksheet.mergeCells(range);
+  const cell = worksheet.getCell(range.split(":")[0]);
+  cell.value = `Generated on: ${formatExportTimestamp(exportedAt)}`;
+  cell.font = { name: "Aptos", size: 9, bold: true, color: rgb(COLORS.blue) };
+  cell.fill = { type: "pattern", pattern: "solid", fgColor: rgb(COLORS.white) };
+  cell.alignment = { horizontal: "center", vertical: "middle" };
+  cell.border = border();
+  const rowNumber = Number(range.match(/\d+/)?.[0] || 1);
+  worksheet.getRow(rowNumber).height = 18;
+}
+
+function addExportTimestampFooter(worksheet, exportedAt) {
+  const footer = `&LGenerated on: ${formatExportTimestamp(exportedAt)}&RPage &P of &N`;
+  worksheet.headerFooter = {
+    ...(worksheet.headerFooter || {}),
+    differentFirst: false,
+    differentOddEven: false,
+    oddFooter: footer,
+    evenFooter: footer,
+  };
 }
 
 function styleHeader(row, fill = COLORS.white) {
@@ -473,110 +144,11 @@ async function toBase64(asset) {
   return null;
 }
 
-// Excel cannot draw the signing line over an image the way the PDF does, so an
-// opaque signature would hide the line underneath it. Any near-white pixel is
-// knocked out to fully transparent before the image is embedded, which lets the
-// dashed baseline show through exactly as it does in the PDF. Files that are
-// already transparent are unaffected. Runs in the browser only - if there is no
-// canvas the original image is used unchanged.
-const SIGNATURE_WHITE_CUTOFF = 235;
-
-async function withTransparentBackground(base64, extension) {
-  if (typeof document === "undefined" || typeof document.createElement !== "function") return null;
-  if (typeof Image !== "function") return null;
-  return new Promise((resolve) => {
-    const image = new Image();
-    image.onload = () => {
-      try {
-        const canvas = document.createElement("canvas");
-        canvas.width = image.naturalWidth || image.width;
-        canvas.height = image.naturalHeight || image.height;
-        if (!canvas.width || !canvas.height) { resolve(null); return; }
-        const context = canvas.getContext("2d");
-        if (!context) { resolve(null); return; }
-        context.drawImage(image, 0, 0);
-        const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
-        const values = pixels.data;
-        for (let index = 0; index < values.length; index += 4) {
-          if (
-            values[index] >= SIGNATURE_WHITE_CUTOFF
-            && values[index + 1] >= SIGNATURE_WHITE_CUTOFF
-            && values[index + 2] >= SIGNATURE_WHITE_CUTOFF
-          ) {
-            values[index + 3] = 0;
-          }
-        }
-        context.putImageData(pixels, 0, 0);
-        resolve(canvas.toDataURL("image/png").split(",")[1] || null);
-      } catch (error) {
-        // A tainted canvas or unsupported image must not stop the export.
-        resolve(null);
-      }
-    };
-    image.onerror = () => resolve(null);
-    image.src = `data:image/${extension || "png"};base64,${base64}`;
-  });
-}
-
-async function placeSignature(workbook, worksheet, asset, anchor) {
-  if (!asset) return;
+async function placeSignature(workbook, worksheet, asset, col, row, width = 118, height = 45) {
   const base64 = await toBase64(asset);
   if (!base64) return;
-  if (asset.transparentBase64 === undefined) {
-    asset.transparentBase64 = await withTransparentBackground(base64, asset.extension);
-  }
-  const imageId = workbook.addImage({
-    base64: asset.transparentBase64 || base64,
-    extension: asset.transparentBase64 ? "png" : (asset.extension || "png"),
-  });
-  // A two-cell anchor with explicit native (EMU) offsets. ExcelJS's fractional
-  // col/row shorthand converts against the DEFAULT row height, not the heights
-  // we set, so it lands the image in the wrong row; native offsets are exact.
-  // Excel also repairs one-cell anchors written by ExcelJS ("Drawing shape"),
-  // while two-cell anchors - what Excel itself writes - open cleanly.
-  worksheet.addImage(imageId, {
-    tl: {
-      nativeCol: anchor.leftColumn,
-      nativeColOff: pixelsToEmu(anchor.leftOffset),
-      nativeRow: anchor.topRow,
-      nativeRowOff: pixelsToEmu(anchor.topOffset),
-    },
-    br: {
-      nativeCol: anchor.rightColumn,
-      nativeColOff: pixelsToEmu(anchor.rightOffset),
-      nativeRow: anchor.bottomRow,
-      nativeRowOff: pixelsToEmu(anchor.bottomOffset),
-    },
-    editAs: "oneCell",
-  });
-}
-
-function pixelsToEmu(pixels) {
-  return Math.max(0, Math.round(Number(pixels) * 9525));
-}
-
-// Absolute pixel X across the sheet -> which column it falls in, plus the
-// offset inside that column.
-function resolveColumn(widths, absolutePixels) {
-  let remaining = Math.max(0, absolutePixels);
-  for (let index = 0; index < widths.length; index += 1) {
-    const columnPixels = columnWidthToPixels(widths[index]);
-    if (remaining < columnPixels) return { column: index, offset: remaining };
-    remaining -= columnPixels;
-  }
-  return { column: widths.length - 1, offset: 0 };
-}
-
-function pixelsBeforeColumn(widths, oneBasedColumn) {
-  let total = 0;
-  for (let index = 0; index < oneBasedColumn - 1 && index < widths.length; index += 1) {
-    total += columnWidthToPixels(widths[index]);
-  }
-  return total;
-}
-
-function pointsToPixels(points) {
-  return Math.round((Number(points) || 0) * (4 / 3));
+  const imageId = workbook.addImage({ base64, extension: asset.extension || "png" });
+  worksheet.addImage(imageId, { tl: { col, row }, ext: { width, height } });
 }
 
 function columnWidthToPixels(width) {
@@ -595,212 +167,30 @@ function columnPositionForPixels(widths, startColumn, offsetPixels) {
   return widths.length - 1;
 }
 
-
-// Divide the sheet width into `count` blocks of near-equal PIXEL width, snapped
-// to real column boundaries (merged cells can only start/end on a column edge).
-// Equal column COUNTS would look lop-sided here because the columns themselves
-// differ in width, so the split is done on measured pixels instead.
-// Master and the other calculation sheets are deliberately kept in the file so
-// every formula keeps resolving, but they are never meant to be browsed. Master
-// is marked veryHidden so it cannot be brought back through Excel's Unhide
-// dialog; the rest stay normally hidden.
-const ALWAYS_VERY_HIDDEN = new Set(["Master", "Stock WRT.O_Final", "Stock WRT.O"]);
-
-// ExcelJS can READ more conditional-formatting rule types than it can WRITE.
-// "duplicateValues" is one such type: the reader keeps it, the writer has no
-// serializer for it, so the <conditionalFormatting> container comes out with no
-// <cfRule> child. Excel treats that as invalid XML and offers to repair the
-// workbook. Only rule types that actually round-trip are kept.
-const WRITABLE_CF_RULES = new Set([
-  "cellIs",
-  "expression",
-  "containsText",
-  "notContainsText",
-  "beginsWith",
-  "endsWith",
-  "containsBlanks",
-  "notContainsBlanks",
-  "containsErrors",
-  "notContainsErrors",
-  "timePeriod",
-  "aboveAverage",
-  "top10",
-  "dataBar",
-  "colorScale",
-  "iconSet",
-]);
-
-// ExcelJS drops conditional-formatting rule types it does not understand (data
-// bars, colour scales, icon sets) but still writes the empty <conditionalFormatting>
-// container. A container with no <cfRule> child is invalid OOXML, and Excel reports
-// it as "part with XML error" and offers to repair the file. Strip those empties -
-// the rules were already lost by the reader, so nothing extra is sacrificed.
-function dropEmptyConditionalFormatting(workbook) {
-  workbook.eachSheet((sheet) => {
-    const formattings = sheet.conditionalFormattings;
-    if (!Array.isArray(formattings) || formattings.length === 0) return;
-    const kept = formattings
-      .map((entry) => {
-        if (!entry || !Array.isArray(entry.rules)) return null;
-        const rules = entry.rules.filter((rule) => WRITABLE_CF_RULES.has(rule?.type));
-        return rules.length > 0 ? { ...entry, rules } : null;
-      })
-      .filter(Boolean);
-    if (kept.length !== formattings.length) sheet.conditionalFormattings = kept;
-  });
-}
-
-// Every sheet in an exported workbook is protected with this password, so the
-// figures cannot be altered by accident once the file leaves the app. Excel sheet
-// protection is a tamper guard, not encryption - the file contents stay readable.
-const SHEET_PROTECTION_PASSWORD = "9";
-
-async function protectAllSheets(workbook) {
-  for (const sheet of workbook.worksheets) {
-    try {
-      await sheet.protect(SHEET_PROTECTION_PASSWORD, {
-        // Excel's default of 100,000 spins costs ~17s across these 14 sheets.
-        spinCount: 10000,
-        // Reading, selecting and copying stay available; structural edits do not.
-        selectLockedCells: true,
-        selectUnlockedCells: true,
-        formatCells: false,
-        formatColumns: false,
-        formatRows: false,
-        insertRows: false,
-        insertColumns: false,
-        insertHyperlinks: false,
-        deleteRows: false,
-        deleteColumns: false,
-        sort: false,
-        autoFilter: false,
-        pivotTables: false,
-      });
-    } catch (error) {
-      // A sheet that refuses protection must not abort the whole export.
-    }
-  }
-}
-
-function applySheetVisibility(workbook, visibleSheets) {
-  workbook.eachSheet((sheet) => {
-    if (visibleSheets.has(sheet.name)) {
-      sheet.state = "visible";
-      return;
-    }
-    sheet.state = ALWAYS_VERY_HIDDEN.has(sheet.name) ? "veryHidden" : "hidden";
-  });
-}
-
-function splitColumnsEvenly(widths, count) {
-  const pixels = widths.map(columnWidthToPixels);
-  const total = pixels.reduce((sum, value) => sum + value, 0);
-  const cumulative = [];
-  let running = 0;
-  pixels.forEach((value) => { running += value; cumulative.push(running); });
-
-  const ranges = [];
-  let startColumn = 1;
-  for (let index = 1; index <= count; index += 1) {
-    let endColumn;
-    if (index === count) {
-      endColumn = widths.length;
-    } else {
-      const target = (total * index) / count;
-      const lastAllowed = widths.length - (count - index);
-      let best = startColumn;
-      let bestDistance = Infinity;
-      for (let column = startColumn; column <= lastAllowed; column += 1) {
-        const distance = Math.abs(cumulative[column - 1] - target);
-        if (distance < bestDistance) { bestDistance = distance; best = column; }
-      }
-      endColumn = best;
-    }
-    ranges.push([startColumn, endColumn]);
-    startColumn = endColumn + 1;
-  }
-  return ranges;
-}
-
-// Same approval form as the PDF: four signatures on the first row, then rows of
-// three. Keeping one source of truth means Excel and PDF never drift apart.
-function signatureRowGroups(signatories) {
-  const groups = [];
-  if (signatories.length === 0) return groups;
-  groups.push(signatories.slice(0, 4));
-  for (let start = 4; start < signatories.length; start += 3) {
-    groups.push(signatories.slice(start, start + 3));
-  }
-  return groups.filter((group) => group.length > 0);
-}
-
-async function placeSignatureInBlock(workbook, worksheet, asset, startColumn, endColumn, blockRow, widths, options = {}) {
-  if (!asset) return;
-  const blockLeft = pixelsBeforeColumn(widths, startColumn);
-  let blockPixels = 0;
-  for (let column = startColumn; column <= endColumn; column += 1) {
-    blockPixels += columnWidthToPixels(widths[column - 1]);
-  }
-
-  const imageWidth = Math.max(70, Math.min(options.maxWidth || 160, Math.round(blockPixels * 0.6)));
-  const imageHeight = options.height || 52;
-  // Centre the ink horizontally over the caption text, which is merged and
-  // centred across exactly the same columns.
-  const left = blockLeft + (blockPixels - imageWidth) / 2;
-  const leftEdge = resolveColumn(widths, left);
-  const rightEdge = resolveColumn(widths, left + imageWidth);
-
-  // The dashed line is the BOTTOM border of blockRow, so the boundary between
-  // blockRow and the row under it IS the line. Keeping ~72% of the signature
-  // above it and ~28% below makes the ink cross the line as it does on paper.
-  const aboveLine = Math.round(imageHeight * 0.72);
-  const belowLine = imageHeight - aboveLine;
-  const signingRowPixels = pointsToPixels(worksheet.getRow(blockRow).height || 30);
-  const captionRowPixels = pointsToPixels(worksheet.getRow(blockRow + 1).height || 18);
-
-  // nativeRow is 0-indexed, so blockRow (1-based) is nativeRow blockRow - 1.
-  let topRow = blockRow - 1;
-  let topOffset = signingRowPixels - aboveLine;
-  if (topOffset < 0) {
-    // Signature is taller than the signing row - start it in the row above.
-    const previousRowPixels = pointsToPixels(worksheet.getRow(blockRow - 1).height || 18);
-    topRow = blockRow - 2;
-    topOffset = Math.max(0, previousRowPixels + topOffset);
-  }
-
-  await placeSignature(workbook, worksheet, asset, {
-    leftColumn: leftEdge.column,
-    leftOffset: leftEdge.offset,
-    rightColumn: rightEdge.column,
-    rightOffset: rightEdge.offset,
-    topRow,
-    topOffset,
-    bottomRow: blockRow,
-    bottomOffset: Math.min(belowLine, captionRowPixels),
-  });
-}
-
-function applySignatureLine(worksheet, startColumn, endColumn, blockRow) {
-  for (let column = startColumn; column <= endColumn; column += 1) {
-    const cell = worksheet.getCell(blockRow, column);
-    cell.fill = { type: "pattern", pattern: "solid", fgColor: rgb(COLORS.white) };
-    cell.border = { bottom: { style: "dashed", color: rgb(COLORS.line) } };
-  }
+async function placeCenteredSignature(workbook, worksheet, asset, startColumn, endColumn, signatureRow, widths) {
+  const blockPixels = widths.slice(startColumn - 1, endColumn).reduce((total, width) => total + columnWidthToPixels(width), 0);
+  const imageWidth = Math.max(58, Math.min(104, Math.round(blockPixels * 0.55)));
+  const leftOffset = Math.max(0, (blockPixels - imageWidth) / 2);
+  const col = columnPositionForPixels(widths, startColumn, leftOffset);
+  // Position the image centred above the dashed signing baseline, matching the
+  // PDF layout. Keeping the lower edge just above the line prevents the ink
+  // from drifting into the role/name rows in Excel.
+  return placeSignature(workbook, worksheet, asset, col, signatureRow - 1 + 0.05, imageWidth, 34);
 }
 
 async function addSourceSignature(workbook, worksheet, assets, endRow, widths, label) {
   const sourceAsset = getSignatureAsset(assets, "source-signature-1");
   const signatureRow = endRow + 2;
   const endColumn = Math.min(3, widths.length);
-  safeMerge(worksheet, signatureRow, 1, signatureRow, endColumn);
+  worksheet.mergeCells(signatureRow, 1, signatureRow, endColumn);
   const lineCell = worksheet.getCell(signatureRow, 1);
   lineCell.value = "";
   lineCell.fill = { type: "pattern", pattern: "solid", fgColor: rgb(COLORS.white) };
   lineCell.border = { bottom: { style: "dashed", color: rgb(COLORS.line) } };
   worksheet.getRow(signatureRow).height = 31;
-  await placeSignatureInBlock(workbook, worksheet, sourceAsset, 1, endColumn, signatureRow, widths, { maxWidth: 150, height: 46 });
+  await placeCenteredSignature(workbook, worksheet, sourceAsset, 1, endColumn, signatureRow, widths);
 
-  safeMerge(worksheet, signatureRow + 1, 1, signatureRow + 1, endColumn);
+  worksheet.mergeCells(signatureRow + 1, 1, signatureRow + 1, endColumn);
   const caption = worksheet.getCell(signatureRow + 1, 1);
   caption.value = label;
   caption.font = { name: "Aptos", size: 9, color: rgb(COLORS.black) };
@@ -846,283 +236,118 @@ function addPositiveNegativeRules(sheet, reference) {
   }
 }
 
-// Descriptions and measuring tools exactly as they appear in the source
-// "Sales Forecasting Format" sheet. They are indexed against the 14 scoring rows
-// returned by calculateForecastScore(); the model label is used if the list ever
-// falls out of step with the model.
-const SCORE_ROW_LABELS = [
-  "Population Density/Residential Area",
-  "House Rent/Income Level",
-  "Location Type",
-  "Market/Bazar/Shopping Mall/Other Brands",
-  "Avg. Sales of Departmental Stores",
-  "Road Status",
-  "Mosque/Mandir/Girza",
-  "School/College/University",
-  "Bank/Office/ATM BOOTH",
-  "Competitor Presence with Avg Sales",
-  "CNG, Bus, Train Station/ Pick & Drop",
-  "Front Fasia",
-  "Signboard Visibility",
-  "Hotel & Restaurant & Hospital/ Club",
-];
-
-const SCORE_ROW_TOOLS = [
-  "High/Medium/Low",
-  "A/B/C",
-  null, // Location Type shows its answer across the Measuring Tools + Answers cells
-  "Within Bazar/Near Bazar",
-  "Avg per Day Sales",
-  "Main Road/Support Road/Block",
-  "How Many",
-  "How Many",
-  "How Many",
-  "Avg per Day Sales",
-  "Y/N",
-  "Long-feet",
-  "High/Medium/Low",
-  "How Many",
-];
-
-function scoreBorder() {
-  return border("thin", COLORS.black);
-}
-
-function scoreHeaderCell(cell, value) {
-  cell.value = value;
-  cell.font = { name: "Aptos", size: 11, bold: true, color: rgb(COLORS.black) };
-  cell.fill = { type: "pattern", pattern: "solid", fgColor: rgb(COLORS.scoreGreen) };
-  cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
-  cell.border = scoreBorder();
-}
-
-function scoreBodyCell(cell, options = {}) {
-  cell.font = {
-    name: "Aptos",
-    size: 10,
-    bold: options.bold === true,
-    color: rgb(options.color || COLORS.black),
-  };
-  cell.alignment = {
-    horizontal: options.align || "center",
-    vertical: "middle",
-    wrapText: options.wrap !== false,
-  };
-  cell.border = scoreBorder();
-  if (options.fill) cell.fill = { type: "pattern", pattern: "solid", fgColor: rgb(options.fill) };
-  if (options.numFmt) cell.numFmt = options.numFmt;
-}
-
-async function addScoreSheet(workbook, data, model, assets) {
-  const sheet = recreateSheet(workbook, "Sales forecasting tools", { properties: { defaultRowHeight: 18 } });
-  sheet.views = [{ showGridLines: false }];
-  sheet.pageSetup = {
-    orientation: "landscape",
-    paperSize: 9,
-    fitToPage: true,
-    fitToWidth: 1,
-    fitToHeight: 1,
-    margins: { left: 0.25, right: 0.25, top: 0.3, bottom: 0.3, header: 0.1, footer: 0.1 },
-  };
-  // A..H mirror the source format: SL, Description, Weightage, Target,
-  // Measuring Tools, Answers, Mark, Achievement.
-  const scoreWidths = [4, 42, 20, 12, 30, 16, 12, 14];
+async function addScoreSheet(workbook, data, model, assets, exportedAt) {
+  const sheet = workbook.addWorksheet("Sales forecasting tools", { properties: { defaultRowHeight: 20 } });
+  sheet.views = [{ showGridLines: false, state: "frozen", ySplit: 2 }];
+  sheet.pageSetup = { orientation: "landscape", paperSize: 9, fitToPage: true, fitToWidth: 1, fitToHeight: 1, margins: { left: 0.25, right: 0.25, top: 0.3, bottom: 0.3, header: 0.1, footer: 0.1 } };
+  const scoreWidths = [6, 38, 14, 11, 31, 18, 14, 15, 15];
   setColWidths(sheet, scoreWidths);
+  applyTitle(sheet, "A1:I1", "Sales Forecasting Format");
+  sheet.getRow(1).height = 27;
+  addExportTimestampRow(sheet, "A2:I2", exportedAt);
+  addExportTimestampFooter(sheet, exportedAt);
+  const header = sheet.getRow(3);
+  ["SL", "Description", "Weightage", "Target", "Measuring Tools", "Answers", "Mark", "Achievement", "Status"].forEach((value, index) => { header.getCell(index + 1).value = value; });
+  styleHeader(header);
 
-  safeMerge(sheet, "A1:H1");
-  const title = sheet.getCell("A1");
-  title.value = "Sales Forecasting Format";
-  title.font = { name: "Aptos Display", size: 16, bold: true, color: rgb(COLORS.black) };
-  title.alignment = { horizontal: "center", vertical: "middle" };
-  sheet.getRow(1).height = 26;
-
-  const headerRow = sheet.getRow(2);
-  ["SL", "Description", "Weightage", "Target", "Measuring Tools", "Answers", "Mark", "Achievement"]
-    .forEach((label, index) => scoreHeaderCell(headerRow.getCell(index + 1), label));
-  headerRow.height = 32;
-
-  // Row 1 of the form is the location size reference: no weight, no mark.
-  const scoreRows = model.forecastScore.rows || [];
-  const formRows = [
-    {
-      label: "Location Size Range",
-      weight: null,
-      tool: "SFT",
-      answer: data.project.sft,
-      mark: null,
-      achievement: null,
-    },
-    ...scoreRows.map((row, index) => ({
-      label: SCORE_ROW_LABELS[index] || row.label,
-      weight: row.weight,
-      tool: SCORE_ROW_TOOLS[index] ?? null,
+  const answers = [
+    { label: "Location Size Range", answer: data.project.sft, tool: "SFT", weight: null, mark: null },
+    ...model.forecastScore.rows.map((row) => ({
+      label: row.label,
       answer: row.answer,
+      tool: "Assessment input",
+      weight: row.weight,
       mark: row.mark,
-      // Weight is a fraction (0.15) and mark is out of 100, so the achieved
-      // share is weight x mark / 100. Without the /100 the percent format
-      // renders 15% as 1500%.
-      achievement: (Number(row.weight) * Number(row.mark)) / 100,
     })),
   ];
-
-  const firstDataRow = 3;
-  formRows.forEach((item, index) => {
-    const rowNumber = firstDataRow + index;
-    const row = sheet.getRow(rowNumber);
-    row.height = 20;
-
-    scoreBodyCell(row.getCell(1), { bold: true });
-    row.getCell(1).value = index + 1;
-
-    scoreBodyCell(row.getCell(2), { align: "left", bold: true });
-    row.getCell(2).value = item.label;
-
-    scoreBodyCell(row.getCell(3), { bold: true, numFmt: item.weight === null ? "@" : "0%" });
-    row.getCell(3).value = item.weight === null ? "" : item.weight;
-
-    scoreBodyCell(row.getCell(4), { bold: true });
-    row.getCell(4).value = item.weight === null ? "" : 100;
-
-    if (item.tool === null) {
-      // Location Type: the chosen type fills the Measuring Tools + Answers cells.
-      safeMerge(sheet, rowNumber, 5, rowNumber, 6);
-      scoreBodyCell(row.getCell(5), { bold: true, fill: COLORS.yellow, color: COLORS.blue });
-      row.getCell(5).value = item.answer ?? "";
-      scoreBodyCell(row.getCell(6), { fill: COLORS.yellow });
-    } else {
-      scoreBodyCell(row.getCell(5), { color: COLORS.blue });
-      row.getCell(5).value = item.tool;
-      scoreBodyCell(row.getCell(6), { bold: true, fill: COLORS.yellow, color: COLORS.blue });
-      row.getCell(6).value = item.answer ?? "";
+  answers.forEach((item, index) => {
+    const row = sheet.getRow(index + 4);
+    row.values = [index + 1, item.label, item.weight ?? "", item.weight ? 100 : "", item.tool, item.answer, item.mark ?? "", item.weight ? item.mark * item.weight : "", item.weight ? "Calculated" : "Reference"];
+    row.eachCell((cell, column) => styleCell(cell, column === 3 || column === 8 ? "percent" : column === 4 || column === 7 ? "integer" : "text", column === 6 ? COLORS.yellow : null, column === 2));
+    if (item.weight === null) {
+      row.getCell(3).numFmt = "@";
+      row.getCell(8).numFmt = "@";
     }
-
-    scoreBodyCell(row.getCell(7), { numFmt: item.mark === null ? "@" : INTEGER_FORMAT });
-    row.getCell(7).value = item.mark === null ? "" : item.mark;
-
-    scoreBodyCell(row.getCell(8), { numFmt: item.achievement === null ? "@" : "0%" });
-    row.getCell(8).value = item.achievement === null ? "" : item.achievement;
   });
+  const scoreRow = sheet.getRow(answers.length + 4);
+  scoreRow.getCell(2).value = "Forecasting Score";
+  scoreRow.getCell(3).value = 1;
+  scoreRow.getCell(8).value = model.forecastScore.total / 100;
+  scoreRow.getCell(9).value = model.forecastScore.total >= 75 ? "Strong" : model.forecastScore.total >= 60 ? "Review" : "Risk";
+  scoreRow.eachCell((cell, column) => styleCell(cell, column === 3 || column === 8 ? "percent" : "text", COLORS.green, true));
 
-  const totalRowNumber = firstDataRow + formRows.length;
-  const totalRow = sheet.getRow(totalRowNumber);
-  totalRow.height = 20;
-  for (let column = 1; column <= 8; column += 1) scoreBodyCell(totalRow.getCell(column), { bold: true });
-  totalRow.getCell(3).value = 1;
-  totalRow.getCell(3).numFmt = "0%";
-  totalRow.getCell(8).value = Number(model.forecastScore.total) / 100;
-  totalRow.getCell(8).numFmt = "0%";
-
-  const blockStart = totalRowNumber + 2;
-
-  const referenceRows = [
-    ["Enter Location Area", data.project.locationArea, "text", "highlight"],
-    ["Enter  Division Name", data.project.division, "text", "highlight"],
-    ["P&P (Y OR N)", data.project.pnp, "text", "highlight"],
-    ["GP%", model.inputs.gpPercent, "percent", "plain"],
-    ["Dhaka/out of Dhaka", model.dhakaClassification, "text", "plain"],
-    ["Sales (Reference)", data.reference.referenceSalesPerDay, "integer", "plain"],
-    ["FF (Reference)/Day", data.reference.referenceFootfall, "integer", "plain"],
-    ["Basket (Reference)", data.reference.referenceBasket, "integer", "plain"],
-    ["Profit (Reference)", data.reference.referenceProfit, "integer", "plain"],
-    ["Projected Basket Size (Reference)", model.inputs.basketSize, "integer", "plain"],
-    ["Projected Per Day Sales for this new location", model.inputs.dailySales, "integer", "input"],
-    ["Projected Daily Footfall for this new location", model.inputs.dailyFootfall, "integer", "input"],
-    ["Existing No. of outlets around 1 KM radius", data.project.existingOutlets, "integer", "input"],
+  const detailStart = answers.length + 7;
+  sheet.mergeCells(`A${detailStart}:C${detailStart}`);
+  sheet.getCell(`A${detailStart}`).value = "PROJECT & REFERENCE INFORMATION";
+  styleSectionTitle(sheet.getCell(`A${detailStart}`));
+  const detailRows = [
+    ["Enter Location Area", data.project.locationArea, "text"],
+    ["Enter Division Name", data.project.division, "text"],
+    ["Dhaka / Out of Dhaka", `${model.dhakaClassification} (${model.inputs.areaOutsideDhaka})`, "text"],
+    ["P&P (Y OR N)", data.project.pnp, "text"],
+    ["FR/OWN", data.project.frOwn, "text"],
+    ["GP%", model.inputs.gpPercent, "percent"],
+    ["GP% source", model.sources.gpPercent, "text"],
+    ["GP Share", model.inputs.gpShare, "percent"],
+    ["GP Share source", model.sources.gpShare, "text"],
+    ["Sales (Reference)/Day", data.reference.referenceSalesPerDay, "currency"],
+    ["FF (Reference)/Day", data.reference.referenceFootfall, "number"],
+    ["Basket (Reference)", data.reference.referenceBasket, "number"],
+    ["Projected Basket Size", model.inputs.basketSize, "number"],
+    ["Projected Per Day Sales", model.inputs.dailySales, "currency"],
+    ["Projected Daily Footfall", model.inputs.dailyFootfall, "number"],
+    ["Existing outlets around 1 KM", data.project.existingOutlets, "integer"],
   ];
-
-  referenceRows.forEach(([label, value, type, kind], index) => {
-    const rowNumber = blockStart + index;
-    const row = sheet.getRow(rowNumber);
-    safeMerge(sheet, rowNumber, 1, rowNumber, 2);
-    safeMerge(sheet, rowNumber, 3, rowNumber, 4);
-    const labelCell = row.getCell(1);
-    const valueCell = row.getCell(3);
-    labelCell.value = label;
-    valueCell.value = value === undefined || value === null ? "" : value;
-
-    const labelColor = kind === "highlight" ? COLORS.redText : COLORS.blue;
-    scoreBodyCell(labelCell, {
-      bold: kind !== "plain",
-      color: labelColor,
-      fill: kind === "input" ? COLORS.peach : null,
-    });
-    scoreBodyCell(valueCell, {
-      bold: kind !== "plain",
-      color: COLORS.black,
-      fill: kind === "plain" ? null : COLORS.yellow,
-      numFmt: type === "percent" ? "0.0%" : type === "integer" ? INTEGER_FORMAT : null,
-    });
-    row.height = index === 0 ? 40 : 20;
+  detailRows.forEach(([label, value, type], index) => {
+    const rowNo = detailStart + 1 + index;
+    sheet.mergeCells(`A${rowNo}:B${rowNo}`);
+    sheet.getCell(`A${rowNo}`).value = label;
+    sheet.getCell(`C${rowNo}`).value = value;
+    styleCell(sheet.getCell(`A${rowNo}`), "text", index > 11 ? COLORS.peach : null, index > 11);
+    styleCell(sheet.getCell(`C${rowNo}`), type, index === 13 || index === 14 ? COLORS.yellow : null, index > 11);
   });
 
-  const categoryTitleRow = blockStart;
-  safeMerge(sheet, categoryTitleRow, 5, categoryTitleRow, 8);
-  const categoryTitle = sheet.getCell(categoryTitleRow, 5);
-  categoryTitle.value = "Category wise Sales Mix";
-  categoryTitle.font = { name: "Aptos", size: 11, bold: true, underline: true, color: rgb(COLORS.black) };
-  categoryTitle.alignment = { horizontal: "center", vertical: "middle" };
-
-  const categoryHeaderRow = categoryTitleRow + 1;
-  safeMerge(sheet, categoryHeaderRow, 5, categoryHeaderRow, 6);
-  scoreBodyCell(sheet.getCell(categoryHeaderRow, 5), { bold: true, fill: COLORS.sky });
-  sheet.getCell(categoryHeaderRow, 5).value = "Category";
-  scoreBodyCell(sheet.getCell(categoryHeaderRow, 6), { fill: COLORS.sky });
-  scoreBodyCell(sheet.getCell(categoryHeaderRow, 7), { bold: true, fill: COLORS.sky });
-  sheet.getCell(categoryHeaderRow, 7).value = "Per Day Sales";
-  scoreBodyCell(sheet.getCell(categoryHeaderRow, 8), { bold: true, fill: COLORS.sky });
-  sheet.getCell(categoryHeaderRow, 8).value = "Monthly Sales";
-  sheet.getRow(categoryHeaderRow).height = 34;
-
-  // Fresh categories are shown in red in the source format.
-  const RED_CATEGORIES = new Set(["Perishables", "Protein"]);
-  (model.categories || []).forEach((category, index) => {
-    const rowNumber = categoryHeaderRow + 1 + index;
-    const row = sheet.getRow(rowNumber);
-    safeMerge(sheet, rowNumber, 5, rowNumber, 6);
+  const categoryStart = detailStart;
+  sheet.mergeCells(`E${categoryStart}:I${categoryStart}`);
+  sheet.getCell(`E${categoryStart}`).value = "CATEGORY WISE SALES MIX";
+  styleSectionTitle(sheet.getCell(`E${categoryStart}`));
+  const categoryHeader = sheet.getRow(categoryStart + 1);
+  ["Category", "Mix", "Per Day Sales", "Monthly Sales", ""].forEach((value, index) => { categoryHeader.getCell(index + 5).value = value; });
+  styleHeader(categoryHeader);
+  model.categories.forEach((category, index) => {
+    const row = sheet.getRow(categoryStart + 2 + index);
     row.getCell(5).value = category.name;
-    scoreBodyCell(row.getCell(5), {
-      align: "left",
-      bold: true,
-      color: RED_CATEGORIES.has(category.name) ? COLORS.redText : COLORS.black,
-    });
-    scoreBodyCell(row.getCell(6), {});
+    row.getCell(6).value = category.mix;
     row.getCell(7).value = category.perDaySales;
-    scoreBodyCell(row.getCell(7), { align: "right", numFmt: INTEGER_FORMAT });
     row.getCell(8).value = category.monthlySales;
-    scoreBodyCell(row.getCell(8), { align: "right", bold: true, numFmt: INTEGER_FORMAT });
-    row.height = 18;
+    [5, 6, 7, 8].forEach((col) => styleCell(row.getCell(col), col === 6 ? "percent" : col > 6 ? "currency" : "text", null, false));
   });
-
-  const categoryTotalRow = categoryHeaderRow + 1 + (model.categories || []).length;
-  safeMerge(sheet, categoryTotalRow, 5, categoryTotalRow, 6);
-  scoreBodyCell(sheet.getCell(categoryTotalRow, 5), {});
-  scoreBodyCell(sheet.getCell(categoryTotalRow, 6), {});
-  sheet.getCell(categoryTotalRow, 7).value = model.inputs.dailySales;
-  scoreBodyCell(sheet.getCell(categoryTotalRow, 7), { align: "right", bold: true, numFmt: INTEGER_FORMAT });
-  sheet.getCell(categoryTotalRow, 8).value = model.inputs.monthlySales;
-  scoreBodyCell(sheet.getCell(categoryTotalRow, 8), { align: "right", bold: true, numFmt: INTEGER_FORMAT });
-
-  // Signature sits under the reference block on the left, as in the source sheet.
-  const referenceEndRow = blockStart + referenceRows.length - 1;
-  const signatureEndRow = await addSourceSignature(workbook, sheet, assets, referenceEndRow, scoreWidths, "");
-  sheet.pageSetup.printArea = `A1:H${Math.max(signatureEndRow, categoryTotalRow)}`;
+  const categoryTotalRow = sheet.getRow(categoryStart + 2 + model.categories.length);
+  categoryTotalRow.getCell(5).value = "Total";
+  categoryTotalRow.getCell(6).value = 1;
+  categoryTotalRow.getCell(7).value = model.inputs.dailySales;
+  categoryTotalRow.getCell(8).value = model.inputs.monthlySales;
+  [5, 6, 7, 8].forEach((col) => styleCell(categoryTotalRow.getCell(col), col === 6 ? "percent" : col > 6 ? "currency" : "text", COLORS.green, true));
+  const finalRow = Math.max(detailStart + detailRows.length, categoryTotalRow.number);
+  const signatureEndRow = await addSourceSignature(workbook, sheet, assets, finalRow, scoreWidths, "Source Signature 1");
+  sheet.pageSetup.printArea = `A1:I${signatureEndRow}`;
 }
 
-// ---- lower half: reference block (left) and category sales mix (right) ----
-
-async function addInformationSheet(workbook, data, model, assets) {
-  const sheet = recreateSheet(workbook, "INFORMATION", { properties: { defaultRowHeight: 20 } });
+async function addInformationSheet(workbook, data, model, assets, exportedAt) {
+  const sheet = workbook.addWorksheet("INFORMATION", { properties: { defaultRowHeight: 20 } });
   sheet.views = [{ showGridLines: false }];
   sheet.pageSetup = { orientation: "landscape", paperSize: 9, fitToPage: true, fitToWidth: 1, fitToHeight: 1, margins: { left: 0.25, right: 0.25, top: 0.3, bottom: 0.3, header: 0.1, footer: 0.1 } };
   setColWidths(sheet, [32, 26, 3, 24, 10, 13, 15, 3, 3, 3, 3]);
+  addExportTimestampRow(sheet, "A1:G1", exportedAt);
+  addExportTimestampFooter(sheet, exportedAt);
   applyTitle(sheet, "A2:G2", "BUSINESS FEASIBILITY INFORMATION");
   sheet.getRow(2).height = 27;
-  safeMerge(sheet, "A4:B4");
+  sheet.mergeCells("A4:B4");
   sheet.getCell("A4").value = "PROJECT NAME";
   styleSectionTitle(sheet.getCell("A4"));
   // Keep the project name block separate from the manpower heading; overlapping
   // merged ranges cause ExcelJS to reject the export.
-  safeMerge(sheet, "C4:D4");
+  sheet.mergeCells("C4:D4");
   sheet.getCell("C4").value = data.project.locationArea;
   sheet.getCell("C4").font = { name: "Aptos", size: 11, bold: true, color: rgb(COLORS.black) };
   sheet.getCell("C4").fill = { type: "pattern", pattern: "solid", fgColor: rgb(COLORS.white) };
@@ -1149,13 +374,13 @@ async function addInformationSheet(workbook, data, model, assets) {
   basicRows.forEach(([label, value, type], index) => {
     const row = 6 + index;
     sheet.getCell(`A${row}`).value = label;
-    safeMerge(sheet, `B${row}:C${row}`);
+    sheet.mergeCells(`B${row}:C${row}`);
     sheet.getCell(`B${row}`).value = value;
     styleCell(sheet.getCell(`A${row}`), "text", index >= 9 ? COLORS.yellow : null, false);
     styleCell(sheet.getCell(`B${row}`), type, index >= 9 ? COLORS.yellow : null, false);
     sheet.getCell(`C${row}`).border = border();
   });
-  safeMerge(sheet, "E4:G4");
+  sheet.mergeCells("E4:G4");
   sheet.getCell("E4").value = "MANPOWER ALLOCATION";
   styleSectionTitle(sheet.getCell("E4"));
   const manpowerHeader = sheet.getRow(6);
@@ -1182,30 +407,31 @@ async function addInformationSheet(workbook, data, model, assets) {
   sheet.pageSetup.printArea = `A1:G${signatureEndRow}`;
 }
 
-async function addFeasibilitySheet(workbook, data, model, assets) {
-  const sheet = recreateSheet(workbook, "AUTO GENERATED FEASIBILITY", { properties: { defaultRowHeight: 18 } });
+async function addFeasibilitySheet(workbook, data, model, assets, exportedAt) {
+  const sheet = workbook.addWorksheet("AUTO GENERATED FEASIBILITY", { properties: { defaultRowHeight: 18 } });
   sheet.views = [{ showGridLines: false, state: "frozen", ySplit: 2, xSplit: 2 }];
   sheet.pageSetup = { orientation: "portrait", paperSize: 8, fitToPage: true, fitToWidth: 1, fitToHeight: 1, margins: { left: 0.2, right: 0.2, top: 0.3, bottom: 0.3, header: 0.1, footer: 0.1 } };
   const feasibilityWidths = [39, 14, 14, 14, 14, 3, 14, 14, 14, 14, 14, 16];
   setColWidths(sheet, feasibilityWidths);
-  safeMerge(sheet, "A1:B1");
+  sheet.mergeCells("A1:B1");
   sheet.getCell("A1").value = data.project.locationArea;
   sheet.getCell("A1").font = { name: "Aptos", size: 11, bold: true, color: rgb(COLORS.black) };
   sheet.getCell("A1").fill = { type: "pattern", pattern: "solid", fgColor: rgb(COLORS.white) };
   sheet.getCell("A1").alignment = { horizontal: "center", vertical: "middle", wrapText: true };
   sheet.getCell("A1").border = border("medium");
-  safeMerge(sheet, "C1:D1");
-  sheet.getCell("C1").value = "Prepare Date";
+  sheet.mergeCells("C1:D1");
+  sheet.getCell("C1").value = "Generated on";
   sheet.getCell("C1").font = { name: "Aptos", bold: true, color: rgb(COLORS.black) };
   sheet.getCell("C1").fill = { type: "pattern", pattern: "solid", fgColor: rgb(COLORS.white) };
   sheet.getCell("C1").alignment = { horizontal: "center" };
   sheet.getCell("C1").border = border("medium");
-  sheet.getCell("E1").value = new Date();
-  sheet.getCell("E1").numFmt = "dd-mmm-yy";
+  sheet.mergeCells("E1:L1");
+  sheet.getCell("E1").value = formatExportTimestamp(exportedAt);
   sheet.getCell("E1").font = { name: "Aptos", bold: true, color: rgb(COLORS.black) };
   sheet.getCell("E1").fill = { type: "pattern", pattern: "solid", fgColor: rgb(COLORS.white) };
   sheet.getCell("E1").alignment = { horizontal: "center" };
   sheet.getCell("E1").border = border("medium");
+  addExportTimestampFooter(sheet, exportedAt);
   const reportHeader = sheet.getRow(2);
   ["", "Number / Percentage", "1st Month", "2nd Month", "3rd Month", "", "1st year", "2nd year", "3rd year", "4th year", "5th year", "Total"].forEach((value, index) => { reportHeader.getCell(index + 1).value = value; });
   styleHeader(reportHeader);
@@ -1238,7 +464,7 @@ async function addFeasibilitySheet(workbook, data, model, assets) {
       addPositiveNegativeRules(sheet, `G${rowIndex}:L${rowIndex}`);
     }
     if (item.type === "heading") {
-      safeMerge(sheet, `A${rowIndex}:L${rowIndex}`);
+      sheet.mergeCells(`A${rowIndex}:L${rowIndex}`);
       row.getCell(1).alignment = { horizontal: "left", vertical: "middle" };
       row.height = 20;
     }
@@ -1251,7 +477,7 @@ async function addFeasibilitySheet(workbook, data, model, assets) {
   });
 
   rowIndex += 1;
-  safeMerge(sheet, `A${rowIndex}:B${rowIndex}`);
+  sheet.mergeCells(`A${rowIndex}:B${rowIndex}`);
   sheet.getCell(`A${rowIndex}`).value = "Cash-flow & Return Summary";
   styleSectionTitle(sheet.getCell(`A${rowIndex}`));
   ["YR-1", "YR-2", "YR-3", "YR-4", "YR-5"].forEach((value, index) => { sheet.getCell(rowIndex, 7 + index).value = value; });
@@ -1283,7 +509,7 @@ async function addFeasibilitySheet(workbook, data, model, assets) {
   metrics.forEach(([label, value, type], index) => {
     const row = sheet.getRow(rowIndex + index);
     row.getCell(1).value = label;
-    safeMerge(sheet, `B${rowIndex + index}:C${rowIndex + index}`);
+    sheet.mergeCells(`B${rowIndex + index}:C${rowIndex + index}`);
     row.getCell(2).value = value;
     styleCell(row.getCell(1), "text", null, index >= 1);
     styleCell(row.getCell(2), type, null, index >= 1);
@@ -1295,67 +521,54 @@ async function addFeasibilitySheet(workbook, data, model, assets) {
   });
 
   const signStart = rowIndex + metrics.length + 3;
-  const signatureGroups = signatureRowGroups(model.signatories);
-  const BLOCK_HEIGHT = 8;
-  for (let groupIndex = 0; groupIndex < signatureGroups.length; groupIndex += 1) {
-    const group = signatureGroups[groupIndex];
-    const ranges = splitColumnsEvenly(feasibilityWidths, group.length);
-    const blockRow = signStart + groupIndex * BLOCK_HEIGHT;
+  const cols = [1, 4, 7, 10];
+  for (let index = 0; index < model.signatories.length; index += 1) {
+    const person = model.signatories[index];
+    const blockRow = signStart + Math.floor(index / cols.length) * 8;
+    const col = cols[index % cols.length];
+    // Keep the full line as two bordered cells. This avoids a line ending up beside the image after Excel renders it.
+    [col, col + 1].forEach((lineColumn) => {
+      const lineCell = sheet.getCell(blockRow, lineColumn);
+      lineCell.border = { bottom: { style: "dashed", color: rgb(COLORS.line) } };
+      lineCell.fill = { type: "pattern", pattern: "solid", fgColor: rgb(COLORS.white) };
+    });
     sheet.getRow(blockRow).height = 30;
+    sheet.mergeCells(blockRow + 1, col, blockRow + 1, col + 1);
+    sheet.getCell(blockRow + 1, col).value = person.role;
+    sheet.getCell(blockRow + 1, col).alignment = { horizontal: "center", vertical: "middle" };
+    sheet.getCell(blockRow + 1, col).font = { name: "Aptos", size: 9 };
+    sheet.mergeCells(blockRow + 2, col, blockRow + 2, col + 1);
+    sheet.getCell(blockRow + 2, col).value = person.name;
+    sheet.getCell(blockRow + 2, col).alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+    sheet.getCell(blockRow + 2, col).font = { name: "Aptos", size: 9, bold: true };
+    sheet.mergeCells(blockRow + 3, col, blockRow + 3, col + 1);
+    sheet.getCell(blockRow + 3, col).value = person.designation;
+    sheet.getCell(blockRow + 3, col).alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+    sheet.getCell(blockRow + 3, col).font = { name: "Aptos", size: 8 };
     sheet.getRow(blockRow + 1).height = 18;
     sheet.getRow(blockRow + 2).height = 22;
     sheet.getRow(blockRow + 3).height = 27;
-    for (let index = 0; index < group.length; index += 1) {
-      const person = group[index];
-      const [startColumn, endColumn] = ranges[index];
-      applySignatureLine(sheet, startColumn, endColumn, blockRow);
-      const captions = [
-        [1, person.role, { name: "Aptos", size: 9 }],
-        [2, person.name, { name: "Aptos", size: 9, bold: true }],
-        [3, person.designation, { name: "Aptos", size: 8 }],
-      ];
-      for (const [offset, value, font] of captions) {
-        safeMerge(sheet, blockRow + offset, startColumn, blockRow + offset, endColumn);
-        const cell = sheet.getCell(blockRow + offset, startColumn);
-        cell.value = value || "";
-        cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
-        cell.font = font;
-      }
-      // Mirror the PDF rule: the tick box controls the ink only. The dashed line,
-      // role and name always stay in place so the form can be signed by hand.
-      const asset = person.includeInPdf === true
-        ? getSignatureAsset(assets, person.signatureId)
-        : null;
-      await placeSignatureInBlock(workbook, sheet, asset, startColumn, endColumn, blockRow, feasibilityWidths);
-    }
+    await placeCenteredSignature(workbook, sheet, getSignatureAsset(assets, person.signatureId), col, col + 1, blockRow, feasibilityWidths);
   }
-  const signatureRows = Math.max(1, signatureGroups.length);
-  sheet.pageSetup.printArea = `A1:L${signStart + signatureRows * BLOCK_HEIGHT - 1}`;
+  const signatureRows = Math.max(1, Math.ceil(model.signatories.length / cols.length));
+  sheet.pageSetup.printArea = `A1:L${signStart + signatureRows * 8 - 1}`;
 }
 
 export async function buildValuesOnlyWorkbook(data, model, assets = []) {
   if (!globalThis.ExcelJS) throw new Error("Excel export module did not load. Refresh the page and try again.");
+  const exportedAt = new Date();
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "Shwapno Feasibility Dashboard";
-  workbook.created = new Date();
-  workbook.modified = new Date();
-  await addScoreSheet(workbook, data, model, assets);
-  await addInformationSheet(workbook, data, model, assets);
-  await addFeasibilitySheet(workbook, data, model, assets);
+  workbook.created = exportedAt;
+  workbook.modified = exportedAt;
+  await addScoreSheet(workbook, data, model, assets, exportedAt);
+  await addInformationSheet(workbook, data, model, assets, exportedAt);
+  await addFeasibilitySheet(workbook, data, model, assets, exportedAt);
   return workbook;
 }
 
 export async function downloadValuesOnlyWorkbook(data, model, assets = []) {
   const workbook = await buildValuesOnlyWorkbook(data, model, assets);
-  const visibleSheets = new Set([
-    "Sales forecasting tools",
-    "INFORMATION",
-    "AUTO GENERATED FEASIBILITY",
-  ]);
-  dropEmptyConditionalFormatting(workbook);
-  applySheetVisibility(workbook, visibleSheets);
-  await protectAllSheets(workbook);
-
   const buffer = await workbook.xlsx.writeBuffer();
   const blob = new Blob([buffer], { type: XLSX_MIME });
   const anchor = document.createElement("a");
@@ -1366,48 +579,6 @@ export async function downloadValuesOnlyWorkbook(data, model, assets = []) {
   anchor.click();
   anchor.remove();
   window.setTimeout(() => URL.revokeObjectURL(anchor.href), 1000);
-}
-
-// Chromium browsers can open a real "Save as" dialog so the workbook goes
-// straight into a chosen PC folder under a chosen filename. Firefox/Safari have
-// no such API, and the picker also throws when the page is not in a secure or
-// user-activated context - both cases fall back to a normal download.
-// showSaveFilePicker needs TRANSIENT USER ACTIVATION - it only works within a few
-// seconds of the click. Building the workbook takes far longer than that, so the
-// handle is claimed up front, before any of the heavy work starts. Doing it
-// afterwards makes the browser reject the call and the export silently falls back
-// to an ordinary download - which is exactly how the "save to folder" option
-// disappeared once sheet protection was added.
-async function requestSaveTarget(suggestedName) {
-  const picker = globalThis.window?.showSaveFilePicker;
-  if (typeof picker !== "function") return null;
-  try {
-    return await picker.call(globalThis.window, {
-      suggestedName,
-      types: [{ description: "Excel Workbook", accept: { [XLSX_MIME]: [".xlsx"] } }],
-    });
-  } catch (error) {
-    if (error?.name === "AbortError") throw error;   // the user pressed Cancel
-    return null;                                      // picker unavailable here
-  }
-}
-
-async function writeToSaveTarget(handle, blob, suggestedName) {
-  if (handle) {
-    try {
-      const writable = await handle.createWritable();
-      try {
-        await writable.write(blob);
-      } finally {
-        await writable.close();
-      }
-      return { method: "save-picker", fileName: handle.name || suggestedName };
-    } catch (error) {
-      // Writing failed (permission withdrawn, disk error) - still give them the file.
-    }
-  }
-  downloadBlob(blob, suggestedName);
-  return { method: "browser-download", fileName: suggestedName };
 }
 
 function safeFileName(value, fallback = "Feasibility") {
@@ -1435,87 +606,77 @@ async function getConfiguredRulesWorkbook() {
 }
 
 /**
- * Downloads a functional Excel workbook with the CURRENT Data Entry values.
- * The uploaded/master workbook is used only as the rules/support-sheet base.
+ * Download Excel with Rules (CORRECTED)
+ *
+ * Uses the current dashboard data/model to rebuild the three report sheets,
+ * while retaining the master workbook support sheets, formulas and rules.
  */
 export async function downloadRulesWorkbook(
   data,
-  model = {},
+  model,
   assets = [],
-  sourceBuffer = null,
-  sourceName = "source-workbook.xlsx",
+  sourceBuffer = null
 ) {
-  const fileName = `${safeFileName(data?.project?.locationArea, "Feasibility")}.xlsx`;
-  // Claimed first, while the click still counts as user activation.
-  const saveTarget = await requestSaveTarget(fileName);
-
-  try {
-    if (!globalThis.ExcelJS) {
-      throw new Error("ExcelJS is not loaded.");
-    }
-
-    let baseBuffer = sourceBuffer;
-
-    if (!(baseBuffer instanceof ArrayBuffer) || baseBuffer.byteLength === 0) {
-      const configuredWorkbook = await getConfiguredRulesWorkbook();
-
-      if (!configuredWorkbook?.buffer) {
-        throw new Error("Master workbook could not be loaded.");
-      }
-
-      baseBuffer = configuredWorkbook.buffer;
-      sourceName = configuredWorkbook.sourceName || sourceName;
-    }
-
-    const workbook = new ExcelJS.Workbook();
-
-    await workbook.xlsx.load(baseBuffer);
-
-    // Refresh existing report sheets from CURRENT dashboard state.
-    // Template mode: leave every sheet exactly as the master workbook has it and
-    // write only the input cells, so all formulas survive and Excel recalculates
-    // them on open. This is what makes the rules visible in the formula bar.
-    applyInputsToTemplate(workbook, data);
-    await applyTemplateSignatures(workbook, model, assets);
-
-    const visibleSheets = new Set([
-      "Sales forecasting tools",
-      "INFORMATION",
-      "AUTO GENERATED FEASIBILITY",
-    ]);
-
-    dropEmptyConditionalFormatting(workbook);
-    applySheetVisibility(workbook, visibleSheets);
-    await protectAllSheets(workbook);
-
-    const outputBuffer = await workbook.xlsx.writeBuffer();
-
-    if (!outputBuffer || outputBuffer.byteLength < 5000) {
-      throw new Error(
-        `Invalid Excel buffer generated (${outputBuffer?.byteLength || 0} bytes).`
-      );
-    }
-
-    const blob = new Blob(
-      [outputBuffer],
-      {
-        type: XLSX_MIME,
-      }
-    );
-
-    const saved = await writeToSaveTarget(saveTarget, blob, fileName);
-
-    return {
-      method: saved.method,
-      fileName: saved.fileName,
-      sourceName,
-      size: outputBuffer.byteLength,
-    };
-
-  } catch (error) {
-    console.error("Rules Excel export error:", error);
-    throw new Error(
-      `Rules Excel export failed: ${error.message}`
-    );
+  if (!globalThis.ExcelJS) {
+    throw new Error("Excel export module did not load. Refresh the page and try again.");
   }
-};
+
+  const exportedAt = new Date();
+
+  let workbook;
+
+  // Load master workbook as the rules base.
+  if (sourceBuffer instanceof ArrayBuffer && sourceBuffer.byteLength > 0) {
+    workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(sourceBuffer);
+  } else {
+    const configuredWorkbook = await getConfiguredRulesWorkbook();
+    workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(configuredWorkbook.buffer);
+  }
+
+  /*
+    IMPORTANT:
+    Rebuild report sheets from CURRENT Data Entry values.
+    Do not download the untouched master workbook.
+  */
+
+  workbook.created = exportedAt;
+  workbook.modified = exportedAt;
+  await addScoreSheet(workbook, data, model, assets, exportedAt);
+  await addInformationSheet(workbook, data, model, assets, exportedAt);
+  await addFeasibilitySheet(workbook, data, model, assets, exportedAt);
+
+  // Keep report sheets visible, hide support/master sheets.
+  const visibleSheets = new Set([
+    "Sales forecasting tools",
+    "INFORMATION",
+    "AUTO GENERATED FEASIBILITY",
+  ]);
+
+  workbook.eachSheet((sheet) => {
+    sheet.state = visibleSheets.has(sheet.name)
+      ? "visible"
+      : "hidden";
+  });
+
+  const buffer = await workbook.xlsx.writeBuffer();
+
+  const blob = new Blob(
+    [buffer],
+    { type: XLSX_MIME }
+  );
+
+  const safeName =
+    safeFileName(
+      data?.project?.locationArea,
+      "Feasibility"
+    ) + "_with_rules.xlsx";
+
+  downloadBlob(blob, safeName);
+
+  return {
+    method: "browser-download",
+    fileName: safeName,
+  };
+}

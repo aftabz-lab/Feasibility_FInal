@@ -8,9 +8,7 @@ const COLORS = {
   teal: [14, 112, 105],
   ink: [25, 37, 50],
   muted: [87, 104, 119],
-  // Pure black so borders stay crisp on a printed page - the old pale grey-blue
-  // (189, 201, 211) all but vanished on paper.
-  line: [0, 0, 0],
+  line: [189, 201, 211],
   pale: [247, 250, 252],
   green: [219, 243, 224],
   greenText: [20, 100, 50],
@@ -19,7 +17,6 @@ const COLORS = {
   yellow: [255, 242, 204],
   orange: [248, 197, 139],
   white: [255, 255, 255],
-  black: [0, 0, 0],
 };
 
 // Review signature shown by itself on the first two PDF pages when its
@@ -35,6 +32,18 @@ function safeName(value) {
     .replace(/[^a-z0-9]+/gi, "_")
     .replace(/^_|_$/g, "")
     .slice(0, 55) || "Feasibility";
+}
+
+function formatExportTimestamp(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = date.getHours();
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const seconds = String(date.getSeconds()).padStart(2, "0");
+  const suffix = hours >= 12 ? "PM" : "AM";
+  const hour = hours % 12 || 12;
+  return `${day} ${months[date.getMonth()]} ${date.getFullYear()}, ${hour}:${minutes}:${seconds} ${suffix}`;
 }
 
 function fill(doc, color) {
@@ -78,18 +87,19 @@ function drawRect(doc, x, y, width, height, options = {}) {
   }
   if (options.border !== false) {
     stroke(doc, options.borderColor ?? COLORS.line);
-    doc.setLineWidth(options.borderWidth ?? 0.5);
+    doc.setLineWidth(options.borderWidth ?? 0.35);
     doc.rect(x, y, width, height);
   }
 }
 
-function drawPageHeader(doc, title, location, pageLabel) {
+function drawPageHeader(doc, title, subtitle, location, pageLabel, exportedAt) {
   const width = doc.internal.pageSize.getWidth();
   const margin = 26;
+  const generatedLabel = `Generated: ${formatExportTimestamp(exportedAt)}`;
   // Keep every non-conditional header white in the PDF.  The thin navy rule
   // preserves the report hierarchy without introducing a coloured header bar.
   drawRect(doc, 0, 0, width, 42, { fill: COLORS.white, border: false });
-  stroke(doc, COLORS.black);
+  stroke(doc, COLORS.navy);
   doc.setLineWidth(0.9);
   doc.line(0, 42, width, 42);
   doc.setFont("helvetica", "bold");
@@ -97,11 +107,18 @@ function drawPageHeader(doc, title, location, pageLabel) {
   textColor(doc, COLORS.navy);
   doc.text(title, margin, 20);
   doc.setFont("helvetica", "normal");
-  doc.setFontSize(6.4);
+  doc.setFontSize(7.3);
   textColor(doc, COLORS.muted);
-  doc.text(ellipsis(doc, location, width - 160, 6.4), margin, 32);
-  doc.text(pageLabel, width - margin, 32, { align: "right" });
-  return 52;
+  doc.setFontSize(6.4);
+  const generatedLabelWidth = doc.getTextWidth(generatedLabel);
+  doc.setFontSize(7.3);
+  doc.text(ellipsis(doc, subtitle, Math.max(80, width - (margin * 2) - generatedLabelWidth - 12), 7.3), margin, 32);
+  doc.setFontSize(6.4);
+  doc.text(generatedLabel, width - margin, 32, { align: "right" });
+  doc.setFontSize(6.4);
+  doc.text(ellipsis(doc, location, width - 160, 6.4), margin, 52);
+  doc.text(pageLabel, width - margin, 52, { align: "right" });
+  return 62;
 }
 
 function drawTable(doc, config) {
@@ -140,21 +157,19 @@ function drawTable(doc, config) {
 function drawLabelValueTable(doc, x, y, width, rows, options = {}) {
   const labelWidth = options.labelWidth ?? Math.round(width * 0.55);
   const rowHeight = options.rowHeight ?? 12;
-  const fontSize = options.fontSize ?? 7.2;
-  const titleFontSize = options.titleFontSize ?? Math.max(7.4, fontSize + 0.3);
   const title = options.title;
   let cursorY = y;
   if (title) {
     drawRect(doc, x, cursorY, width, 15, { fill: COLORS.white, borderColor: COLORS.line });
-    drawText(doc, title, x, cursorY + 10.5, width, { size: titleFontSize, color: COLORS.navy, bold: true, align: "center" });
+    drawText(doc, title, x, cursorY + 10.5, width, { size: 7, color: COLORS.navy, bold: true, align: "center" });
     cursorY += 15;
   }
   rows.forEach(([label, value, kind], index) => {
     const bodyFill = kind === "input" ? COLORS.yellow : index % 2 ? COLORS.pale : COLORS.white;
     drawRect(doc, x, cursorY, labelWidth, rowHeight, { fill: bodyFill });
     drawRect(doc, x + labelWidth, cursorY, width - labelWidth, rowHeight, { fill: bodyFill });
-    drawText(doc, label, x, cursorY + rowHeight - 3.9, labelWidth, { size: fontSize, bold: kind === "key" });
-    drawText(doc, value, x + labelWidth, cursorY + rowHeight - 3.9, width - labelWidth, { size: fontSize, align: "right", bold: kind === "key" });
+    drawText(doc, label, x, cursorY + rowHeight - 3.6, labelWidth, { size: 6.7, bold: kind === "key" });
+    drawText(doc, value, x + labelWidth, cursorY + rowHeight - 3.6, width - labelWidth, { size: 6.7, align: "right", bold: kind === "key" });
     cursorY += rowHeight;
   });
   return cursorY;
@@ -173,11 +188,8 @@ async function drawPageReviewSignature(doc, model, assets, position = {}) {
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
   const margin = 26;
-  // Signatures are drawn at twice their previous size; pages 1 and 2 have ample
-  // room below the final table, so this stays inside the same single page.
-  // Scaled down twice from the original 156 x 84: -30%, then a further -20%.
-  const imageWidth = 87;
-  const imageHeight = 47;
+  const imageWidth = 76;
+  const imageHeight = 49;
   // Pages 1 and 2 pass the lower edge of their final table so this mark stays
   // on the left immediately below the content, rather than floating at the
   // lower-right of the page.
@@ -193,9 +205,9 @@ async function drawPageReviewSignature(doc, model, assets, position = {}) {
   }
 }
 
-async function drawForecastPage(doc, data, model, assets) {
+async function drawForecastPage(doc, data, model, assets, exportedAt) {
   const pageWidth = doc.internal.pageSize.getWidth();
-  let y = drawPageHeader(doc, "SALES FORECASTING TOOLS", sourceLabel(model, data), "Page 2 of 3");
+  let y = drawPageHeader(doc, "SALES FORECASTING TOOLS", "Values-only feasibility output", sourceLabel(model, data), "Page 1 of 3 · Landscape", exportedAt);
   const margin = 26;
   const gap = 12;
   // Page 1 mirrors the complete source assessment: its full weighted score
@@ -204,8 +216,8 @@ async function drawForecastPage(doc, data, model, assets) {
   const rightX = margin + leftWidth + gap;
   const rightWidth = pageWidth - rightX - margin;
   const measuringTools = [
-    "Population Density (H/M/L)",
-    "Income Level (A/B/C)",
+    "High / Medium / Low",
+    "A / B / C",
     "Commercial Hub",
     "Within Bazar / Near Bazar",
     "Avg. per Day Sales",
@@ -239,8 +251,8 @@ async function drawForecastPage(doc, data, model, assets) {
     widths: [17, 161, 39, 34, 103, 54, 35, 57],
     headers: ["SL", "Description", "Weightage", "Target", "Measuring Tools", "Answers", "Mark", "Achievement"],
     rows: scoreRows,
-    rowHeight: 11.5,
-    fontSize: 6.05,
+    rowHeight: 11.3,
+    fontSize: 5.35,
     getFill: (row, column, cell, index) => index === scoreRows.length - 1 ? COLORS.green : (column === 5 ? COLORS.yellow : null),
     getBold: (row, column, cell, index) => index === scoreRows.length - 1,
     // Headers are always centred. The description remains left-aligned, and
@@ -263,7 +275,7 @@ async function drawForecastPage(doc, data, model, assets) {
     ["Projected Daily Footfall for this New Location", formatMoney(model.inputs.dailyFootfall, 1), "input"],
     ["Existing No. of Outlets Around 1 KM Radius", formatMoney(data.project.existingOutlets, 0)],
   ];
-  const projectEnd = drawLabelValueTable(doc, margin, scoreEnd + 13, leftWidth, projectRows, { title: "PROJECT & REFERENCE INFORMATION", labelWidth: 290, rowHeight: 11.5, fontSize: 6.9 });
+  const projectEnd = drawLabelValueTable(doc, margin, scoreEnd + 13, leftWidth, projectRows, { title: "PROJECT & REFERENCE INFORMATION", labelWidth: 290, rowHeight: 11.2 });
 
   const categoryRows = model.categories.map((category) => [
     category.name,
@@ -278,8 +290,8 @@ async function drawForecastPage(doc, data, model, assets) {
     widths: [rightWidth * 0.43, rightWidth * 0.13, rightWidth * 0.21, rightWidth * 0.23],
     headers: ["Category", "Mix", "Per Day", "Monthly"],
     rows: categoryRows,
-    rowHeight: 11.5,
-    fontSize: 6.15,
+    rowHeight: 11.3,
+    fontSize: 5.5,
     getFill: (row, column, cell, index) => index === categoryRows.length - 1 ? COLORS.green : null,
     getBold: (row, column, cell, index) => index === categoryRows.length - 1,
     getAlign: (row, column) => column === 0 ? "left" : "right",
@@ -288,9 +300,9 @@ async function drawForecastPage(doc, data, model, assets) {
   await drawPageReviewSignature(doc, model, assets, { x: margin, y: forecastLastTableEnd + 5 });
 }
 
-async function drawInformationPage(doc, data, model, assets) {
+async function drawInformationPage(doc, data, model, assets, exportedAt) {
   const pageWidth = doc.internal.pageSize.getWidth();
-  let y = drawPageHeader(doc, "BUSINESS FEASIBILITY INFORMATION", sourceLabel(model, data), "Page 1 of 3");
+  let y = drawPageHeader(doc, "BUSINESS FEASIBILITY INFORMATION", "Values-only feasibility output", sourceLabel(model, data), "Page 2 of 3 · Landscape", exportedAt);
   const margin = 26;
   const gap = 18;
   const leftWidth = 365;
@@ -313,7 +325,7 @@ async function drawInformationPage(doc, data, model, assets) {
     ["Area Out of Dhaka", `${model.dhakaClassification} (${model.inputs.areaOutsideDhaka})`, "input"],
     ["Decoration Cost", formatMoney(data.information.decorationCost), "input"],
   ];
-  const informationEnd = drawLabelValueTable(doc, margin, y, leftWidth, informationRows, { title: "PROJECT PARAMETERS", labelWidth: 188, rowHeight: 14, fontSize: 7.2 });
+  const informationEnd = drawLabelValueTable(doc, margin, y, leftWidth, informationRows, { title: "PROJECT PARAMETERS", labelWidth: 188, rowHeight: 14 });
   const staffRows = data.staff.map((staff) => [
     staff.name,
     formatMoney(staff.quantity, 0),
@@ -333,7 +345,7 @@ async function drawInformationPage(doc, data, model, assets) {
     headers: ["Manpower Allocation", "Qty", "Salary", "Total Amount"],
     rows: staffRows,
     rowHeight: 14,
-    fontSize: 7.2,
+    fontSize: 6.7,
     getFill: (row, column, cell, index) => index === staffRows.length - 1 ? COLORS.green : (column === 1 ? COLORS.yellow : null),
     getBold: (row, column, cell, index) => index === staffRows.length - 1,
     getAlign: (row, column) => column === 0 ? "left" : "right",
@@ -378,7 +390,7 @@ function drawFeasibilityTable(doc, y, data, model) {
   let cursorX = x;
   headers.forEach((header, index) => {
     drawRect(doc, cursorX, y, widths[index], 13, { fill: COLORS.white, borderColor: COLORS.line });
-    drawText(doc, header, cursorX, y + 8.8, widths[index], { size: 6.7, color: COLORS.navy, bold: true, align: index === 0 ? "left" : "center" });
+    drawText(doc, header, cursorX, y + 8.8, widths[index], { size: 6.2, color: COLORS.navy, bold: true, align: index === 0 ? "left" : "center" });
     cursorX += widths[index];
   });
   let cursorY = y + 13;
@@ -398,7 +410,7 @@ function drawFeasibilityTable(doc, y, data, model) {
       const cellFill = columnIndex === 5 ? COLORS.pale : valueTone(model, row, sourceValue, timeIndex);
       drawRect(doc, cursorX, cursorY, widths[columnIndex], rowHeight, { fill: cellFill || (rowIndex % 2 ? COLORS.pale : COLORS.white) });
       drawText(doc, value, cursorX, cursorY + 7.15, widths[columnIndex], {
-        size: columnIndex === 0 ? 6.55 : 6.45,
+        size: columnIndex === 0 ? 6.2 : 6.1,
         bold: row.emphasis,
         color: columnIndex >= 2 && columnIndex !== 5 ? valueTextTone(model, row, sourceValue, timeIndex) : COLORS.ink,
         align: columnIndex === 0 ? "left" : "right",
@@ -427,7 +439,7 @@ function drawReturnSection(doc, x, y, width, data, model) {
     rows: returnRows,
     rowHeight: 11.5,
     headerHeight: 13,
-    fontSize: 6.6,
+    fontSize: 6.2,
     getFill: (row, column, cell, index) => index === 2 && column > 0 ? (String(cell).includes("-") ? COLORS.red : COLORS.green) : null,
     getAlign: (row, column) => column === 0 ? "left" : "right",
   });
@@ -443,7 +455,6 @@ function drawReturnSection(doc, x, y, width, data, model) {
     title: "RETURN METRICS",
     labelWidth: 138,
     rowHeight: 11.5,
-    fontSize: 6.7,
   });
 }
 
@@ -483,11 +494,7 @@ async function drawSignatureBlocks(doc, y, model, assets, options = {}) {
     rows.push({ people: signatories.slice(start, start + 3), preferredLineWidth: 180, useFullPageWidth: true });
   }
 
-  // Signatures are twice their old size (86x33 -> ~170x66) and the caption fonts
-  // are larger, so each block needs more vertical room. Page 3 is A3 portrait and
-  // had ~158pt of unused space at the bottom, which absorbs the extra height
-  // without pushing the approval form onto a fourth page.
-  const rowHeight = 124;
+  const rowHeight = 76;
   const assetById = new Map(assets.map((asset) => [asset.id, asset]));
   let renderedRows = 0;
   for (const row of rows) {
@@ -506,46 +513,45 @@ async function drawSignatureBlocks(doc, y, model, assets, options = {}) {
       const person = rowSignatories[index];
       const lineX = rowAreaX + gap * (index + 1) + lineWidth * index;
       const x = lineX - 4;
-      const lineY = top + 58;
+      const lineY = top + 27;
       const dataUrl = person.includeInPdf === true ? await imageDataUrl(assetById.get(person.signatureId)) : null;
       if (dataUrl) {
-        // Scaled down twice from the original 172 x 66: -30%, then a further -20%.
-        const imageWidth = Math.min(96, lineWidth);
-        const imageHeight = 37;
+        const imageWidth = Math.min(86, lineWidth * 0.6);
+        const imageHeight = 33;
         const format = /image\/jpe?g/i.test(dataUrl) ? "JPEG" : "PNG";
         try {
           // Place the ink directly across the signing baseline. The dotted line is
           // intentionally drawn afterwards: many supplied signature PNGs include
           // an opaque white background, which would otherwise hide the line.
-          doc.addImage(dataUrl, format, lineX + (lineWidth - imageWidth) / 2, lineY - 29, imageWidth, imageHeight, undefined, "FAST");
+          doc.addImage(dataUrl, format, lineX + (lineWidth - imageWidth) / 2, lineY - 16, imageWidth, imageHeight, undefined, "FAST");
         } catch {
           // An unsupported upload should never stop the PDF export. The dashed line remains usable for a handwritten signature.
         }
       }
       // Redraw the dotted signing line over the image so both the signature and
       // the line remain visibly crossed in every PDF viewer, even for non-transparent PNGs.
-      stroke(doc, COLORS.black);
+      stroke(doc, [82, 97, 111]);
       doc.setLineWidth(0.7);
       doc.setLineDashPattern([1.6, 1.8], 0);
       doc.line(lineX, lineY, lineX + lineWidth, lineY);
       doc.setLineDashPattern([], 0);
-      drawText(doc, person.role || "", x, top + 86, blockWidth, { size: 8.4, align: "center", color: COLORS.muted });
-      drawText(doc, person.name || "", x, top + 99, blockWidth, { size: 9.2, align: "center", bold: true });
-      drawText(doc, person.designation || "", x, top + 111, blockWidth, { size: 7.6, align: "center", color: COLORS.muted });
+      drawText(doc, person.role || "", x, top + 51, blockWidth, { size: 6.5, align: "center", color: COLORS.muted });
+      drawText(doc, person.name || "", x, top + 61, blockWidth, { size: 6.8, align: "center", bold: true });
+      drawText(doc, person.designation || "", x, top + 70, blockWidth, { size: 5.9, align: "center", color: COLORS.muted });
     }
     renderedRows += 1;
   }
   return y + renderedRows * rowHeight;
 }
 
-async function drawFeasibilityPage(doc, data, model, assets) {
+async function drawFeasibilityPage(doc, data, model, assets, exportedAt) {
   const pageWidth = doc.internal.pageSize.getWidth();
   // The feasibility table has its own fixed width. The signature strip uses
   // the full printable page width so its 4 + 3 approval layout is centred.
   const signatureMargin = 28;
   const signatureX = signatureMargin;
   const signatureWidth = pageWidth - (signatureMargin * 2);
-  let y = drawPageHeader(doc, "AUTO GENERATED FEASIBILITY", sourceLabel(model, data), "Page 3 of 3");
+  let y = drawPageHeader(doc, "AUTO GENERATED FEASIBILITY", "Values-only model output with conditional checks", sourceLabel(model, data), "Page 3 of 3 · Portrait", exportedAt);
   const table = drawFeasibilityTable(doc, y, data, model);
   y = table.y + 10;
   if (model.alerts?.franchisePbtAboveOutletPlYear1) {
@@ -555,70 +561,24 @@ async function drawFeasibilityPage(doc, data, model, assets) {
   }
   y = drawReturnSection(doc, table.x, y, table.width, data, model) + 17;
   drawRect(doc, signatureX, y, signatureWidth, 14, { fill: COLORS.white, borderColor: COLORS.line });
-  drawText(doc, "APPROVAL & SIGNATURES", signatureX, y + 10, signatureWidth, { size: 8.6, color: COLORS.navy, bold: true, align: "center" });
+  drawText(doc, "APPROVAL & SIGNATURES", signatureX, y + 9.5, signatureWidth, { size: 6.9, color: COLORS.navy, bold: true, align: "center" });
   await drawSignatureBlocks(doc, y + 12, model, assets, { x: signatureX, width: signatureWidth });
 }
 
 export async function buildFeasibilityPdf(data, model, assets = []) {
   const jsPDF = globalThis.jspdf?.jsPDF;
   if (!jsPDF) throw new Error("PDF export module did not load. Refresh the page and try again.");
+  const exportedAt = new Date();
   const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4", compress: true });
-  // Page order: Information, then Sales Forecasting Tools, then the feasibility
-  // statement. Both of the first two are A4 landscape, so only the draw order
-  // changes; the A3 portrait page stays last.
-  await drawInformationPage(doc, data, model, assets);
+  await drawForecastPage(doc, data, model, assets, exportedAt);
   doc.addPage("a4", "landscape");
-  await drawForecastPage(doc, data, model, assets);
+  await drawInformationPage(doc, data, model, assets, exportedAt);
   doc.addPage("a3", "portrait");
-  await drawFeasibilityPage(doc, data, model, assets);
+  await drawFeasibilityPage(doc, data, model, assets, exportedAt);
   return doc;
 }
 
 export async function downloadFeasibilityPdf(data, model, assets = []) {
   const doc = await buildFeasibilityPdf(data, model, assets);
   doc.save(`${safeName(data.project.locationArea)}_feasibility_report.pdf`);
-}
-
-// Hands the PDF to whatever the device already has installed - WhatsApp, Outlook,
-// Teams, Drive and so on - through the operating system's own share sheet.
-//
-// Only the Web Share API can pass a real FILE to another app. A mailto: or wa.me
-// link can pre-fill text but cannot carry an attachment, so where Web Share is
-// missing (most desktop browsers) the PDF is saved first and the mail client is
-// opened with the message ready, leaving just the attach step to the user.
-export async function shareFeasibilityPdf(data, model, assets = []) {
-  const doc = await buildFeasibilityPdf(data, model, assets);
-  const location = data?.project?.locationArea || "this location";
-  const fileName = `${safeName(data.project.locationArea)}_feasibility_report.pdf`;
-  const subject = `Feasibility report - ${location}`;
-  const body = `Please find the feasibility report for ${location} attached.`;
-
-  const blob = doc.output("blob");
-  const canUseShare = typeof navigator !== "undefined"
-    && typeof navigator.share === "function"
-    && typeof File === "function";
-
-  if (canUseShare) {
-    const file = new File([blob], fileName, { type: "application/pdf" });
-    if (typeof navigator.canShare !== "function" || navigator.canShare({ files: [file] })) {
-      try {
-        await navigator.share({ files: [file], title: subject, text: body });
-        return { method: "share-sheet", fileName };
-      } catch (error) {
-        // The user dismissing the sheet is not a failure worth reporting.
-        if (error?.name === "AbortError") return { method: "cancelled", fileName };
-      }
-    }
-  }
-
-  doc.save(fileName);
-  return { method: "download", fileName, subject, body };
-}
-
-export function mailtoLink(subject, body) {
-  return `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-}
-
-export function whatsappLink(text) {
-  return `https://wa.me/?text=${encodeURIComponent(text)}`;
 }
