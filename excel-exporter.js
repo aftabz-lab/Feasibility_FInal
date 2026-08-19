@@ -968,6 +968,56 @@ function patchWorksheetFormulas(zip, path, formulas) {
   writeXmlContent(entry, xml);
 }
 
+/*
+ * Some formulas in the original feasibility template are stored as OOXML
+ * shared-formula groups.  Dashboard synchronization intentionally replaces
+ * many of those cells with independent formulas.  If the group's master cell
+ * is replaced while an unedited separator cell (for example F54) still keeps
+ * <f t="shared" si="..."/>, Excel sees an orphan shared-formula reference and
+ * opens the workbook with a repair warning.
+ *
+ * After formula synchronization, remove only orphan shared-formula references.
+ * Their cached <v> values are preserved. Valid shared-formula groups whose
+ * master still exists are untouched, so workbook rules are not changed.
+ */
+function removeOrphanSharedFormulaReferences(zip, path) {
+  const entry = zipEntry(zip, path);
+  if (!entry) throw new Error(`The master workbook is missing ${path}.`);
+  let xml = readXmlContent(entry);
+
+  const groups = new Map();
+  const formulaPattern = /<f\b[^>]*\bt="shared"[^>]*(?:\/>|>[\s\S]*?<\/f>)/gi;
+  let match;
+  while ((match = formulaPattern.exec(xml))) {
+    const tag = match[0];
+    const si = xmlAttribute(tag, "si");
+    if (!si) continue;
+    const group = groups.get(si) || { hasMaster: false };
+    if (/\bref="[^"]+"/i.test(tag)) group.hasMaster = true;
+    groups.set(si, group);
+  }
+
+  const orphanIds = [...groups.entries()]
+    .filter(([, group]) => !group.hasMaster)
+    .map(([si]) => si);
+  if (!orphanIds.length) return;
+
+  orphanIds.forEach((si) => {
+    const escaped = String(si).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // Orphan shared-formula references are self-closing <f .../> nodes.
+    // Match ONLY that node. The previous generic pattern could choose the
+    // paired-formula branch and consume the next cell's <f>...</f>, which
+    // could delete a valid neighbour such as G54 and make Excel appear blank.
+    const orphanFormula = new RegExp(
+      `<f\\b(?=[^>]*\\bt="shared")(?=[^>]*\\bsi="${escaped}")[^>]*\\/\\s*>`,
+      "gi",
+    );
+    xml = xml.replace(orphanFormula, "");
+  });
+
+  writeXmlContent(entry, xml);
+}
+
 function hideWorksheetRows(zip, path, rows) {
   const entry = zipEntry(zip, path);
   if (!entry) throw new Error(`The master workbook is missing ${path}.`);
@@ -1038,33 +1088,93 @@ function patchWorksheetFooter(zip, path, exportedAt) {
  * This does NOT change any dashboard rule, worksheet formula, validation,
  * conditional formatting, named range, drawing, or other workbook rule.
  */
-function removeStaleCalculationChain(zip) {
-  const cfbApi = getCfbApi();
-
-  const relationshipsEntry = zipEntry(zip, "xl/_rels/workbook.xml.rels");
-  if (relationshipsEntry) {
-    let relationshipsXml = readXmlContent(relationshipsEntry);
-    relationshipsXml = relationshipsXml.replace(
-      /<Relationship\b(?=[^>]*\bType="[^"]*\/calcChain")[^>]*\/>/gi,
-      ""
-    );
-    writeXmlContent(relationshipsEntry, relationshipsXml);
+function worksheetFormulaAddresses(zip, path) {
+  const entry = zipEntry(zip, path);
+  if (!entry) return new Set();
+  const xml = readXmlContent(entry);
+  const formulas = new Set();
+  const cellPattern = /<c\b[^>]*\/>|<c\b(?![^>]*\/>)[^>]*>[\s\S]*?<\/c>/gi;
+  let match;
+  while ((match = cellPattern.exec(xml))) {
+    const cellXml = match[0];
+    if (!/<f\b/i.test(cellXml)) continue;
+    const address = xmlAttribute(cellXml, "r");
+    if (address) formulas.add(address.toUpperCase());
   }
-
-  const contentTypesEntry = zipEntry(zip, "[Content_Types].xml");
-  if (contentTypesEntry) {
-    let contentTypesXml = readXmlContent(contentTypesEntry);
-    contentTypesXml = contentTypesXml.replace(
-      /<Override\b(?=[^>]*\bPartName="\/xl\/calcChain\.xml")[^>]*\/>/gi,
-      ""
-    );
-    writeXmlContent(contentTypesEntry, contentTypesXml);
-  }
-
-  // SheetJS CFB path lookup accepts an absolute package path for deletion.
-  // If a template has no calc chain this is intentionally a no-op.
-  if (cfbApi.utils?.cfb_del) cfbApi.utils.cfb_del(zip, "/xl/calcChain.xml");
+  return formulas;
 }
+
+/*
+ * Keep Excel's existing calculation chain so the large reference workbook does
+ * not perform a full 35k+ formula dependency rebuild on every download/open.
+ * Dashboard synchronization can turn some template formula cells into values
+ * and can add new formulas.  Update ONLY those chain memberships while keeping
+ * the original calculation order for every unchanged formula.
+ */
+function synchronizeCalculationChain(zip) {
+  const calcEntry = zipEntry(zip, "xl/calcChain.xml");
+  if (!calcEntry) return;
+
+  const { paths, workbookXml } = worksheetPaths(zip);
+  const sheetIdByName = new Map();
+  const sheetPattern = /<sheet\b[^>]*\/>/gi;
+  let sheetMatch;
+  while ((sheetMatch = sheetPattern.exec(workbookXml))) {
+    const tag = sheetMatch[0];
+    const name = xmlAttribute(tag, "name");
+    const sheetId = Number(xmlAttribute(tag, "sheetId"));
+    if (name && Number.isFinite(sheetId)) sheetIdByName.set(name, sheetId);
+  }
+
+  const formulaSets = new Map();
+  for (const [name, path] of paths.entries()) {
+    const sheetId = sheetIdByName.get(name);
+    if (Number.isFinite(sheetId)) formulaSets.set(sheetId, worksheetFormulaAddresses(zip, path));
+  }
+
+  const originalXml = readXmlContent(calcEntry);
+  const represented = new Map();
+  const kept = [];
+  const chainCellPattern = /<c\b[^>]*\/>/gi;
+  let currentSheetId = null;
+  let match;
+  while ((match = chainCellPattern.exec(originalXml))) {
+    const tag = match[0];
+    const explicit = xmlAttribute(tag, "i");
+    if (explicit !== "") currentSheetId = Number(explicit);
+    const address = xmlAttribute(tag, "r").toUpperCase();
+    const formulaSet = formulaSets.get(currentSheetId);
+    if (!formulaSet || !formulaSet.has(address)) continue;
+
+    let revised = tag.replace(/\s+i="[^"]*"/i, "");
+    revised = revised.replace(/\/>$/, ` i="${currentSheetId}"/>`);
+    kept.push(revised);
+    if (!represented.has(currentSheetId)) represented.set(currentSheetId, new Set());
+    represented.get(currentSheetId).add(address);
+  }
+
+  const additions = [];
+  const addressSort = (left, right) => {
+    const lr = Number(left.match(/\d+$/)?.[0] || 0);
+    const rr = Number(right.match(/\d+$/)?.[0] || 0);
+    if (lr !== rr) return lr - rr;
+    return cellColumnIndex(left) - cellColumnIndex(right);
+  };
+  [...formulaSets.keys()].sort((a, b) => a - b).forEach((sheetId) => {
+    const seen = represented.get(sheetId) || new Set();
+    [...formulaSets.get(sheetId)]
+      .filter((address) => !seen.has(address))
+      .sort(addressSort)
+      .forEach((address) => additions.push(`<c r="${address}" i="${sheetId}"/>`));
+  });
+
+  const rebuilt = originalXml.replace(
+    /(<calcChain\b[^>]*>)[\s\S]*?(<\/calcChain>)/i,
+    `$1${kept.join("")}${additions.join("")}$2`,
+  );
+  writeXmlContent(calcEntry, rebuilt);
+}
+
 
 function setWorkbookSheetVisibility(workbookXml, visibleSheetNames) {
   const visible = new Set(visibleSheetNames.map((name) => name.toLocaleLowerCase()));
@@ -1088,7 +1198,7 @@ function setWorkbookSheetVisibility(workbookXml, visibleSheetNames) {
       .replace(/\s+calcMode="[^"]*"/i, "")
       .replace(/\s+fullCalcOnLoad="[^"]*"/i, "")
       .replace(/\s+forceFullCalc="[^"]*"/i, "");
-    return revised.replace(/\/>$/, ' calcMode="auto" fullCalcOnLoad="1" forceFullCalc="1"/>');
+    return revised.replace(/\/>$/, ' calcMode="auto" calcCompleted="1" fullCalcOnLoad="0" forceFullCalc="0"/>');
   });
   return output;
 }
@@ -1484,6 +1594,7 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
   const feasibilityPatch = buildDashboardFeasibilityPatch(data, model);
   patchWorksheetValues(zip, paths.get("AUTO GENERATED FEASIBILITY"), feasibilityPatch.values);
   patchWorksheetFormulas(zip, paths.get("AUTO GENERATED FEASIBILITY"), feasibilityPatch.formulas);
+  removeOrphanSharedFormulaReferences(zip, paths.get("AUTO GENERATED FEASIBILITY"));
   hideWorksheetRows(zip, paths.get("AUTO GENERATED FEASIBILITY"), [66, 67]);
 
   REPORT_SHEET_NAMES.forEach((name) => patchWorksheetFooter(zip, paths.get(name), exportedAt));
@@ -1492,10 +1603,10 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     setWorkbookSheetVisibility(workbookXml, REPORT_SHEET_NAMES),
   );
 
-  // Formula synchronization invalidates the template's cached calculation
-  // dependency chain. Removing this optional cache prevents Excel's repair
-  // dialog and lets Excel rebuild it safely from the dashboard formulas.
-  removeStaleCalculationChain(zip);
+  // Keep the template calculation chain, but synchronize its formula-cell
+  // membership with the dashboard output. This avoids both a stale-chain
+  // repair warning and a full workbook recalculation/rebuild on first open.
+  synchronizeCalculationChain(zip);
 
   return cfbApi.write(zip, {
     type: "array",
