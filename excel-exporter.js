@@ -329,8 +329,8 @@ async function addScoreSheet(workbook, data, model, assets, exportedAt) {
   categoryTotalRow.getCell(8).value = model.inputs.monthlySales;
   [5, 6, 7, 8].forEach((col) => styleCell(categoryTotalRow.getCell(col), col === 6 ? "percent" : col > 6 ? "currency" : "text", COLORS.green, true));
   const finalRow = Math.max(detailStart + detailRows.length, categoryTotalRow.number);
-  const signatureEndRow = await addSourceSignature(workbook, sheet, assets, finalRow, scoreWidths, "Source Signature 1");
-  sheet.pageSetup.printArea = `A1:I${signatureEndRow}`;
+  // Excel output intentionally contains no signature images/blocks.
+  sheet.pageSetup.printArea = `A1:I${finalRow}`;
 }
 
 async function addInformationSheet(workbook, data, model, assets, exportedAt) {
@@ -402,9 +402,8 @@ async function addInformationSheet(workbook, data, model, assets, exportedAt) {
   totalRow.getCell(5).value = data.staff.reduce((sum, item) => sum + Number(item.quantity || 0), 0);
   totalRow.getCell(7).value = data.staff.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.salary || 0), 0);
   [4, 5, 7].forEach((col) => styleCell(totalRow.getCell(col), col === 4 ? "text" : col === 5 ? "integer" : "currency", COLORS.green, true));
-  const informationWidths = [32, 26, 3, 24, 10, 13, 15, 3, 3, 3, 3];
-  const signatureEndRow = await addSourceSignature(workbook, sheet, assets, totalRow.number, informationWidths, "Source Signature 1");
-  sheet.pageSetup.printArea = `A1:G${signatureEndRow}`;
+  // Excel output intentionally contains no signature images/blocks.
+  sheet.pageSetup.printArea = `A1:G${totalRow.number}`;
 }
 
 async function addFeasibilitySheet(workbook, data, model, assets, exportedAt) {
@@ -520,38 +519,9 @@ async function addFeasibilitySheet(workbook, data, model, assets, exportedAt) {
     row.getCell(3).border = border();
   });
 
-  const signStart = rowIndex + metrics.length + 3;
-  const cols = [1, 4, 7, 10];
-  for (let index = 0; index < model.signatories.length; index += 1) {
-    const person = model.signatories[index];
-    const blockRow = signStart + Math.floor(index / cols.length) * 8;
-    const col = cols[index % cols.length];
-    // Keep the full line as two bordered cells. This avoids a line ending up beside the image after Excel renders it.
-    [col, col + 1].forEach((lineColumn) => {
-      const lineCell = sheet.getCell(blockRow, lineColumn);
-      lineCell.border = { bottom: { style: "dashed", color: rgb(COLORS.line) } };
-      lineCell.fill = { type: "pattern", pattern: "solid", fgColor: rgb(COLORS.white) };
-    });
-    sheet.getRow(blockRow).height = 30;
-    sheet.mergeCells(blockRow + 1, col, blockRow + 1, col + 1);
-    sheet.getCell(blockRow + 1, col).value = person.role;
-    sheet.getCell(blockRow + 1, col).alignment = { horizontal: "center", vertical: "middle" };
-    sheet.getCell(blockRow + 1, col).font = { name: "Aptos", size: 9 };
-    sheet.mergeCells(blockRow + 2, col, blockRow + 2, col + 1);
-    sheet.getCell(blockRow + 2, col).value = person.name;
-    sheet.getCell(blockRow + 2, col).alignment = { horizontal: "center", vertical: "middle", wrapText: true };
-    sheet.getCell(blockRow + 2, col).font = { name: "Aptos", size: 9, bold: true };
-    sheet.mergeCells(blockRow + 3, col, blockRow + 3, col + 1);
-    sheet.getCell(blockRow + 3, col).value = person.designation;
-    sheet.getCell(blockRow + 3, col).alignment = { horizontal: "center", vertical: "middle", wrapText: true };
-    sheet.getCell(blockRow + 3, col).font = { name: "Aptos", size: 8 };
-    sheet.getRow(blockRow + 1).height = 18;
-    sheet.getRow(blockRow + 2).height = 22;
-    sheet.getRow(blockRow + 3).height = 27;
-    await placeCenteredSignature(workbook, sheet, getSignatureAsset(assets, person.signatureId), col, col + 1, blockRow, feasibilityWidths);
-  }
-  const signatureRows = Math.max(1, Math.ceil(model.signatories.length / cols.length));
-  sheet.pageSetup.printArea = `A1:L${signStart + signatureRows * 8 - 1}`;
+  // Keep AUTO GENERATED FEASIBILITY limited to the calculation section only.
+  // The previous signatory rows 94-105 and all signature drawings are excluded.
+  sheet.pageSetup.printArea = `A1:L${rowIndex + metrics.length - 1}`;
 }
 
 export async function buildValuesOnlyWorkbook(data, model, assets = []) {
@@ -1030,6 +1000,81 @@ function hideWorksheetRows(zip, path, rows) {
     });
   });
   writeXmlContent(entry, xml);
+}
+
+
+function removeWorksheetDrawings(zip, path) {
+  const entry = zipEntry(zip, path);
+  if (!entry) throw new Error(`The master workbook is missing ${path}.`);
+  let xml = readXmlContent(entry);
+  const relationIds = [...xml.matchAll(/<drawing\b[^>]*\br:id="([^"]+)"[^>]*\/?>/gi)]
+    .map((match) => match[1]);
+  if (!relationIds.length) return;
+
+  // Remove signature pictures/connectors only; cells, formulas, styles,
+  // validations and all workbook calculation rules are left unchanged.
+  xml = xml.replace(/<drawing\b[^>]*\br:id="[^"]+"[^>]*\/?>/gi, "");
+  writeXmlContent(entry, xml);
+
+  const slash = path.lastIndexOf("/");
+  const folder = path.slice(0, slash);
+  const file = path.slice(slash + 1);
+  const relPath = `${folder}/_rels/${file}.rels`;
+  const relEntry = zipEntry(zip, relPath);
+  if (!relEntry) return;
+  let relXml = readXmlContent(relEntry);
+  relationIds.forEach((relationId) => {
+    const escaped = relationId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const relationship = new RegExp(
+      `<Relationship\\b(?=[^>]*\\bId="${escaped}")(?=[^>]*\\bType="[^"]*\\/drawing")[^>]*\\/\\s*>`,
+      "gi",
+    );
+    relXml = relXml.replace(relationship, "");
+  });
+  writeXmlContent(relEntry, relXml);
+}
+
+function removeWorksheetRows(zip, path, startRow, endRow) {
+  const entry = zipEntry(zip, path);
+  if (!entry) throw new Error(`The master workbook is missing ${path}.`);
+  let xml = readXmlContent(entry);
+
+  for (let rowNumber = startRow; rowNumber <= endRow; rowNumber += 1) {
+    const rowPattern = new RegExp(
+      `<row\\b(?=[^>]*\\br="${rowNumber}")[^>]*(?:\\/\\s*>|>[\\s\\S]*?<\\/row>)`,
+      "gi",
+    );
+    xml = xml.replace(rowPattern, "");
+  }
+
+  // Remove merged ranges belonging to the deleted signatory block.
+  xml = xml.replace(/<mergeCell\b[^>]*\bref="([^"]+)"[^>]*\/\s*>/gi, (tag, reference) => {
+    const rowNumbers = [...String(reference).matchAll(/\$?[A-Z]+\$?(\d+)/gi)]
+      .map((match) => Number(match[1]));
+    return rowNumbers.some((row) => row >= startRow && row <= endRow) ? "" : tag;
+  });
+
+  // Rows 94-105 are the final rows, so trimming the used-range marker is safe
+  // and does not shift any formulas above them.
+  xml = xml.replace(/<dimension\b[^>]*\bref="([^"]+)"[^>]*\/\s*>/i, (tag, reference) => {
+    const revised = String(reference).replace(/(\$?[A-Z]+\$?)\d+$/, `$1${startRow - 1}`);
+    return tag.replace(reference, revised);
+  });
+
+  writeXmlContent(entry, xml);
+}
+
+function setWorksheetPrintArea(workbookXml, sheetName, rangeReference) {
+  const sheetNames = workbookSheetNames(workbookXml);
+  const localSheetId = sheetNames.findIndex((name) => sameSheetName(name, sheetName));
+  if (localSheetId < 0) return workbookXml;
+  const pattern = new RegExp(
+    `(<definedName\\b(?=[^>]*\\bname="_xlnm\\.Print_Area")(?=[^>]*\\blocalSheetId="${localSheetId}")[^>]*>)[\\s\\S]*?(<\\/definedName>)`,
+    "i",
+  );
+  return workbookXml.replace(pattern, (_match, openingTag, closingTag) =>
+    `${openingTag}${rangeReference}${closingTag}`
+  );
 }
 
 function patchWorksheetValues(zip, path, values) {
@@ -1630,10 +1675,22 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
   removeOrphanSharedFormulaReferences(zip, paths.get("AUTO GENERATED FEASIBILITY"));
   hideWorksheetRows(zip, paths.get("AUTO GENERATED FEASIBILITY"), [66, 67]);
 
+  // Excel output only: remove every signature drawing from the report sheets.
+  // The complete signatory section at rows 94-105 is also removed from the
+  // Auto Generated Feasibility sheet. Dashboard/PDF rules remain unchanged.
+  REPORT_SHEET_NAMES.forEach((name) => removeWorksheetDrawings(zip, paths.get(name)));
+  removeWorksheetRows(zip, paths.get("AUTO GENERATED FEASIBILITY"), 94, 105);
+
   REPORT_SHEET_NAMES.forEach((name) => patchWorksheetFooter(zip, paths.get(name), exportedAt));
+  const workbookWithPrintArea = setWorksheetPrintArea(
+    workbookXml,
+    "AUTO GENERATED FEASIBILITY",
+    "'AUTO GENERATED FEASIBILITY'!$A$1:$L$93",
+  );
   writeXmlContent(
     workbookEntry,
-    setWorkbookSheetVisibility(workbookXml, [...REPORT_SHEET_NAMES, "MANPOWER"]),
+    // MANPOWER is still used by INFORMATION formulas but stays hidden.
+    setWorkbookSheetVisibility(workbookWithPrintArea, REPORT_SHEET_NAMES),
   );
 
   // Keep the template calculation chain, but synchronize its formula-cell
