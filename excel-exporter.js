@@ -1496,6 +1496,7 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     "Sales forecasting tools",
     "INFORMATION",
     "AUTO GENERATED FEASIBILITY",
+    "MANPOWER",
   ];
   const missing = requiredSheets.filter((name) => !paths.has(name));
   if (missing.length) throw new Error(`The rules workbook is missing: ${missing.join(", ")}.`);
@@ -1584,12 +1585,44 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     F22: Number(staffById(data, "cleaner").salary || 0),
   };
   patchWorksheetValues(zip, paths.get("INFORMATION"), informationValues);
-  patchWorksheetFormulas(zip, paths.get("INFORMATION"), {
+  const manpowerAuto = data?.information?.manpowerAuto !== false;
+  const manpowerRows = [
+    [7, "om"], [8, "icmo"], [9, "duty"],
+    [12, "cg"], [13, "commodity"], [14, "protein"], [15, "perishables"],
+    [16, "gml"], [17, "pos"], [18, "porter"], [19, "bsm"], [20, "bkstr"],
+    [21, "security"], [22, "cleaner"],
+  ];
+  const nonPnpBandIndex = 'IF($B$9<=1500000,1,IF($B$9<=1800000,2,IF($B$9<=2100000,3,IF($B$9<=2400000,4,IF($B$9<=2700000,5,IF($B$9<=3000000,6,IF($B$9<=3300000,7,IF($B$9<=3600000,8,IF($B$9<=3900000,9,IF($B$9<=4200000,10,IF($B$9<=4500000,11,IF($B$9<=4800000,12,13))))))))))))';
+  const pnpBandIndex = 'IF($B$9<=2700000,1,IF($B$9<=3000000,2,IF($B$9<=3300000,3,IF($B$9<=3600000,4,IF($B$9<=3900000,5,IF($B$9<=4200000,6,IF($B$9<=4500000,7,IF($B$9<=4800000,8,IF($B$9<=5100000,9,IF($B$9<=5400000,10,IF($B$9<=5700000,11,IF($B$9<=6000000,12,IF($B$9<=6300000,13,IF($B$9<=6600000,14,IF($B$9<=6900000,15,IF($B$9<=7200000,16,IF($B$9<=7500000,17,IF($B$9<=7800000,18,IF($B$9<=8100000,19,IF($B$9<=8400000,20,IF($B$9<=8700000,21,IF($B$9<=9000000,22,IF($B$9<=9300000,23,IF($B$9<=9600000,24,25))))))))))))))))))))))))';
+  const informationFormulas = {
     B18: dashboardFormulaSpec(
       'IF(OR(LOWER(TRIM(\'Sales forecasting tools\'!C21))="dhaka",SUBSTITUTE(LOWER(TRIM(\'Sales forecasting tools\'!C21))," ","")="dhakagbud"),"N","Y")',
       model?.inputs?.areaOutsideDhaka ?? "N",
     ),
+  };
+
+  manpowerRows.forEach(([row, id]) => {
+    const qty = Number(staffById(data, id).quantity || 0);
+    if (manpowerAuto) {
+      informationFormulas[`E${row}`] = dashboardFormulaSpec(
+        `IF(UPPER(TRIM($B$14))="Y",INDEX(MANPOWER!$G$25:$AE$38,MATCH(D${row},MANPOWER!$B$25:$B$38,0),${pnpBandIndex}),INDEX(MANPOWER!$C$4:$O$17,MATCH(D${row},MANPOWER!$B$4:$B$17,0),${nonPnpBandIndex}))`,
+        qty,
+      );
+    } else {
+      informationValues[`E${row}`] = qty;
+    }
+    informationFormulas[`G${row}`] = dashboardFormulaSpec(`E${row}*F${row}`, qty * Number(staffById(data, id).salary || 0));
   });
+  informationFormulas.E23 = dashboardFormulaSpec('SUM(E7:E22)', (data?.staff || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0));
+  informationFormulas.G23 = dashboardFormulaSpec('SUM(G7:G22)', (data?.staff || []).reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.salary || 0), 0));
+
+  // When manual headcount is active, overwrite the quantity formula cells with dashboard values.
+  if (!manpowerAuto) {
+    const manualQuantities = {};
+    manpowerRows.forEach(([row, id]) => { manualQuantities[`E${row}`] = Number(staffById(data, id).quantity || 0); });
+    patchWorksheetValues(zip, paths.get("INFORMATION"), manualQuantities);
+  }
+  patchWorksheetFormulas(zip, paths.get("INFORMATION"), informationFormulas);
 
   const feasibilityPatch = buildDashboardFeasibilityPatch(data, model);
   patchWorksheetValues(zip, paths.get("AUTO GENERATED FEASIBILITY"), feasibilityPatch.values);
@@ -1600,7 +1633,7 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
   REPORT_SHEET_NAMES.forEach((name) => patchWorksheetFooter(zip, paths.get(name), exportedAt));
   writeXmlContent(
     workbookEntry,
-    setWorkbookSheetVisibility(workbookXml, REPORT_SHEET_NAMES),
+    setWorkbookSheetVisibility(workbookXml, [...REPORT_SHEET_NAMES, "MANPOWER"]),
   );
 
   // Keep the template calculation chain, but synchronize its formula-cell
