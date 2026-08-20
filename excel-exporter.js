@@ -1527,7 +1527,7 @@ function buildDashboardFeasibilityPatch(data, model) {
   formula("B89", "NPV(B88,G84:K84)+F84", values.B89);
   formula("B90", "IFERROR(B89/SUM(C57:C59),0)", values.B90);
   formula("B91", 'IFERROR(IRR(F84:K84),"N/A")', values.B91);
-  formula("B92", 'IF(SUM(C57:C59)=0,0,IF(G85>=0,G85/G84,IF(H85>=0,1-G85/H84,IF(I85>=0,2-H85/I84,IF(J85>=0,3-I85/J84,IF(K85>=0,4-J85/K84,"Not reached"))))))', values.B92);
+  formula("B92", 'IF(SUM(C57:C59)=0,0,IF(G85>=0,-F84/G84,IF(H85>=0,1-G85/H84,IF(I85>=0,2-H85/I84,IF(J85>=0,3-I85/J84,IF(K85>=0,4-J85/K84,"Not reached"))))))', values.B92);
 
   return { values, formulas };
 }
