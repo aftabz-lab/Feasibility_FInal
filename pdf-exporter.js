@@ -8,7 +8,9 @@ const COLORS = {
   teal: [14, 112, 105],
   ink: [25, 37, 50],
   muted: [87, 104, 119],
-  line: [189, 201, 211],
+  // Pure black. The old pale grey-blue looked fine on screen but faded to almost
+  // nothing on a printed page.
+  line: [0, 0, 0],
   pale: [247, 250, 252],
   green: [219, 243, 224],
   greenText: [20, 100, 50],
@@ -17,6 +19,7 @@ const COLORS = {
   yellow: [255, 242, 204],
   orange: [248, 197, 139],
   white: [255, 255, 255],
+  black: [0, 0, 0],
 };
 
 // Review signature shown by itself on the first two PDF pages when its
@@ -87,7 +90,7 @@ function drawRect(doc, x, y, width, height, options = {}) {
   }
   if (options.border !== false) {
     stroke(doc, options.borderColor ?? COLORS.line);
-    doc.setLineWidth(options.borderWidth ?? 0.35);
+    doc.setLineWidth(options.borderWidth ?? 0.6);
     doc.rect(x, y, width, height);
   }
 }
@@ -99,8 +102,8 @@ function drawPageHeader(doc, title, subtitle, location, pageLabel, exportedAt) {
   // Keep every non-conditional header white in the PDF.  The thin navy rule
   // preserves the report hierarchy without introducing a coloured header bar.
   drawRect(doc, 0, 0, width, 42, { fill: COLORS.white, border: false });
-  stroke(doc, COLORS.navy);
-  doc.setLineWidth(0.9);
+  stroke(doc, COLORS.black);
+  doc.setLineWidth(1.1);
   doc.line(0, 42, width, 42);
   doc.setFont("helvetica", "bold");
   doc.setFontSize(15);
@@ -530,8 +533,8 @@ async function drawSignatureBlocks(doc, y, model, assets, options = {}) {
       }
       // Redraw the dotted signing line over the image so both the signature and
       // the line remain visibly crossed in every PDF viewer, even for non-transparent PNGs.
-      stroke(doc, [82, 97, 111]);
-      doc.setLineWidth(0.7);
+      stroke(doc, COLORS.black);
+      doc.setLineWidth(0.9);
       doc.setLineDashPattern([1.6, 1.8], 0);
       doc.line(lineX, lineY, lineX + lineWidth, lineY);
       doc.setLineDashPattern([], 0);
