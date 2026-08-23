@@ -1,0 +1,12 @@
+--- a/pdf-exporter.js
++++ b/pdf-exporter.js
+@@
+-  const imageWidth = 76;
+-  const imageHeight = 49;
++  const imageWidth = 91.2;
++  const imageHeight = 58.8;
+@@
+-      const imageWidth = Math.min(86, lineWidth * 0.6);
+-      const imageHeight = 33;
++      const imageWidth = Math.min(103.2, lineWidth * 0.72);
++      const imageHeight = 39.6;
