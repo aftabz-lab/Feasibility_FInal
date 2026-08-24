@@ -1209,7 +1209,9 @@ export function extractFromWorkbook(workbook, sourceName = "Imported workbook") 
   data.project.sft = pickNumber(get(forecastSheet, "F3") ?? get(informationSheet, "B6"), data.project.sft);
   data.project.density = String(get(forecastSheet, "F4") ?? data.project.density).toUpperCase();
   data.project.incomeLevel = String(get(forecastSheet, "F5") ?? data.project.incomeLevel).toUpperCase();
-  data.project.locationType = String(get(forecastSheet, "F6") ?? data.project.locationType);
+  // The source forecasting template stores the entered Location Type in E6;
+  // older copies used F6, so retain that as a compatibility fallback.
+  data.project.locationType = String(get(forecastSheet, "E6") ?? get(forecastSheet, "F6") ?? data.project.locationType);
   data.project.longFeet = pickNumber(get(forecastSheet, "F15"), data.project.longFeet);
   data.project.projectedDailySales = pickNumber(get(informationSheet, "B8") ?? get(forecastSheet, "C31"), data.project.projectedDailySales);
   data.project.monthlyRent = pickNumber(get(informationSheet, "B15") ?? get(master, "C10"), data.project.monthlyRent);

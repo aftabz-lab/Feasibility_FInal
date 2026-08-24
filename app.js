@@ -14,7 +14,7 @@ import {
   openedByOptions,
   salesGivenByOptions,
 } from "./model.mjs";
-import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=pbp-fix-v7";
+import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=pbp-fix-v9";
 import { downloadFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js";
 
 const app = document.querySelector("#app");
@@ -77,6 +77,14 @@ function percentPointsForInput(value) {
   // Convert a legacy stored whole-number override (for example 16) before displaying it.
   if (numericValue > 1 && numericValue <= 100) numericValue /= 100;
   return String(Number((numericValue * 100).toFixed(4)));
+}
+
+function roundUpWhole(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) return 0;
+  // The small tolerance keeps an exact whole number from being pushed up by
+  // harmless floating-point noise (for example 13.000000000000002).
+  return Math.ceil(numericValue - 1e-9);
 }
 
 function getPath(object, path) {
@@ -211,7 +219,7 @@ function renderOverview() {
       ${metricCard("Projected Daily Sales", `৳ ${formatMoney(model.inputs.dailySales)}`, "Input / manual sales forecast", "blue")}
       ${metricCard("GP%", formatPercent(model.inputs.gpPercent, 2), `${model.modes.gpPercent} • ${model.sources.gpPercent}`, model.modes.gpPercent === "Manual" ? "amber" : "green")}
       ${metricCard("GP Share", formatPercent(model.inputs.gpShare, 1), `${model.modes.gpShare} • ${model.sources.gpShare}`, model.modes.gpShare === "Manual" ? "amber" : "green")}
-      ${metricCard("Forecasting Score", `${model.forecastScore.total.toFixed(1)} / 100`, model.forecastScore.total >= 75 ? "Strong location case" : "Assess key drivers", model.forecastScore.total >= 75 ? "green" : "amber")}
+      ${metricCard("Forecasting Score", `${roundUpWhole(model.forecastScore.total)} / 100`, model.forecastScore.total >= 75 ? "Strong location case" : "Assess key drivers", model.forecastScore.total >= 75 ? "green" : "amber")}
     </div>
     <div class="dashboard-grid">
       <article class="panel chart-panel">
@@ -497,12 +505,12 @@ function renderDataEntry() {
 
 function renderForecast() {
   const { model, data } = state;
-  const rows = model.forecastScore.rows.map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(row.label)}</td><td>${formatPercent(row.weight, 0)}</td><td>${escapeHtml(String(row.answer))}</td><td>${row.mark}</td><td>${formatPercent((row.mark * row.weight) / 100, 1)}</td></tr>`).join("");
+  const rows = model.forecastScore.rows.map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(row.label)}</td><td>${formatPercent(row.weight, 0)}</td><td>${escapeHtml(String(row.answer))}</td><td>${row.mark}</td><td>${roundUpWhole(row.mark * row.weight)}%</td></tr>`).join("");
   const categories = model.categories.map((category) => `<tr><td>${escapeHtml(category.name)}</td><td>${formatPercent(category.mix, 1)}</td><td>৳ ${formatMoney(category.perDaySales)}</td><td>৳ ${formatMoney(category.monthlySales)}</td></tr>`).join("");
   return `<section class="page">
-    <div class="page-title-row"><div><p class="eyebrow">Sales Forecasting Tools</p><h2>Forecast score & category mix</h2><p class="page-subtitle">The interactive version of the source forecast sheet.</p></div><div class="score-callout"><span>Final score</span><strong>${model.forecastScore.total.toFixed(1)}%</strong></div></div>
+    <div class="page-title-row"><div><p class="eyebrow">Sales Forecasting Tools</p><h2>Forecast score & category mix</h2><p class="page-subtitle">The interactive version of the source forecast sheet.</p></div><div class="score-callout"><span>Final score</span><strong>${roundUpWhole(model.forecastScore.total)}%</strong></div></div>
     <div class="split-report">
-      <article class="panel"><div class="panel-heading"><div><p class="eyebrow">Location assessment</p><h3>Weighted score card</h3></div></div><div class="table-scroll"><table class="report-table"><thead><tr><th>SL</th><th>Description</th><th>Weight</th><th>Answer</th><th>Mark</th><th>Achievement</th></tr></thead><tbody>${rows}<tr class="total-row"><td></td><td>Overall Forecasting Score</td><td>100%</td><td></td><td></td><td>${model.forecastScore.total.toFixed(1)}%</td></tr></tbody></table></div></article>
+      <article class="panel"><div class="panel-heading"><div><p class="eyebrow">Location assessment</p><h3>Weighted score card</h3></div></div><div class="table-scroll"><table class="report-table"><thead><tr><th>SL</th><th>Description</th><th>Weight</th><th>Answer</th><th>Mark</th><th>Achievement</th></tr></thead><tbody>${rows}<tr class="total-row"><td></td><td>Overall Forecasting Score</td><td>100%</td><td></td><td></td><td>${roundUpWhole(model.forecastScore.total)}%</td></tr></tbody></table></div></article>
       <article class="panel"><div class="panel-heading"><div><p class="eyebrow">Sales composition</p><h3>Category-wise projection</h3></div></div><div class="table-scroll"><table class="report-table"><thead><tr><th>Category</th><th>Mix</th><th>Per Day</th><th>Monthly</th></tr></thead><tbody>${categories}<tr class="total-row"><td>Total</td><td>100.0%</td><td>৳ ${formatMoney(model.inputs.dailySales)}</td><td>৳ ${formatMoney(model.inputs.monthlySales)}</td></tr></tbody></table></div></article>
     </div>
     <article class="panel reference-panel"><div class="panel-heading"><div><p class="eyebrow">Workbook reference</p><h3>Auto calculation key</h3></div></div><div class="facts-grid"><div><span>Lookup key</span><strong>${escapeHtml(model.key)}</strong></div><div><span>GP%</span><strong>${formatPercent(model.inputs.gpPercent, 2)}</strong></div><div><span>Dhaka / Out of Dhaka</span><strong>${escapeHtml(model.dhakaClassification)} (${escapeHtml(model.inputs.areaOutsideDhaka)})</strong></div><div><span>Basket size</span><strong>${formatMoney(model.inputs.basketSize, 1)}</strong></div><div><span>Sales reference</span><strong>৳ ${formatMoney(data.reference.referenceSalesPerDay)}</strong></div></div></article>

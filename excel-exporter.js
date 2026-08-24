@@ -262,11 +262,13 @@ async function addScoreSheet(workbook, data, model, assets, exportedAt) {
   ];
   answers.forEach((item, index) => {
     const row = sheet.getRow(index + 4);
-    row.values = [index + 1, item.label, item.weight ?? "", item.weight ? 100 : "", item.tool, item.answer, item.mark ?? "", item.weight ? item.mark * item.weight : "", item.weight ? "Calculated" : "Reference"];
+    row.values = [index + 1, item.label, item.weight ?? "", item.weight ? 100 : "", item.tool, item.answer, item.mark ?? "", item.weight ? item.mark * item.weight / 100 : "", item.weight ? "Calculated" : "Reference"];
     row.eachCell((cell, column) => styleCell(cell, column === 3 || column === 8 ? "percent" : column === 4 || column === 7 ? "integer" : "text", column === 6 ? COLORS.yellow : null, column === 2));
     if (item.weight === null) {
       row.getCell(3).numFmt = "@";
       row.getCell(8).numFmt = "@";
+    } else {
+      row.getCell(8).numFmt = "0%";
     }
   });
   const scoreRow = sheet.getRow(answers.length + 4);
@@ -275,6 +277,8 @@ async function addScoreSheet(workbook, data, model, assets, exportedAt) {
   scoreRow.getCell(8).value = model.forecastScore.total / 100;
   scoreRow.getCell(9).value = model.forecastScore.total >= 75 ? "Strong" : model.forecastScore.total >= 60 ? "Review" : "Risk";
   scoreRow.eachCell((cell, column) => styleCell(cell, column === 3 || column === 8 ? "percent" : "text", COLORS.green, true));
+  scoreRow.getCell(3).numFmt = "0%";
+  scoreRow.getCell(8).numFmt = "0%";
 
   const detailStart = answers.length + 7;
   sheet.mergeCells(`A${detailStart}:C${detailStart}`);
@@ -935,6 +939,37 @@ function patchWorksheetFormulas(zip, path, formulas) {
     if (!spec || !spec.formula) return;
     xml = replaceFormulaCell(xml, address, spec.formula, spec.value);
   });
+  writeXmlContent(entry, xml);
+}
+
+/*
+ * Excel stores both a formula and its last calculated result in each formula
+ * cell. The browser exporter preserves the source formula rules, but Excel (and
+ * preview tools) can display the old cached result until the workbook is opened
+ * in a recalculating desktop client. Refresh the cache while retaining the
+ * exact formula already present in the source template.
+ */
+function refreshWorksheetFormulaCaches(zip, path, values) {
+  const entry = zipEntry(zip, path);
+  if (!entry) throw new Error(`The master workbook is missing ${path}.`);
+  let xml = readXmlContent(entry);
+
+  Object.entries(values).forEach(([address, cachedValue]) => {
+    if (cachedValue === undefined) return;
+    const safeAddress = String(address).toUpperCase();
+    const pairedCellPattern = new RegExp(
+      `<c\\b(?=[^>]*\\br="${safeAddress}")(?![^>]*\\/>)[^>]*>[\\s\\S]*?<\\/c>`,
+      "i",
+    );
+    const current = xml.match(pairedCellPattern)?.[0] || "";
+    const formulaMatch = current.match(/<f\b[^>]*>([\s\S]*?)<\/f>/i);
+    if (!formulaMatch) {
+      throw new Error(`The master workbook is missing the expected formula in ${safeAddress}.`);
+    }
+    const existingFormula = decodeXmlEntities(formulaMatch[1]);
+    xml = replaceFormulaCell(xml, safeAddress, existingFormula, cachedValue);
+  });
+
   writeXmlContent(entry, xml);
 }
 
@@ -1600,11 +1635,87 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
   };
   patchWorksheetValues(zip, paths.get("Sales forecasting tools"), forecastValues);
   patchWorksheetFormulas(zip, paths.get("Sales forecasting tools"), {
+    // C20 remains formula-driven by Master!C2, but its cached display value must
+    // also be refreshed so the downloaded workbook immediately shows the live
+    // Data Entry location even before Excel performs a recalculation.
+    C20: dashboardFormulaSpec(
+      "Master!C2",
+      data?.project?.locationArea ?? "",
+    ),
     C24: dashboardFormulaSpec(
       'IF(OR(LOWER(TRIM(C21))="dhaka",SUBSTITUTE(LOWER(TRIM(C21))," ","")="dhakagbud"),"Dhaka","Out of Dhaka")',
       model?.dhakaClassification ?? "Dhaka",
     ),
   });
+
+  const forecastFormulaCaches = {
+    F3: Number(data?.project?.sft || 0),
+    F4: data?.project?.density ?? "",
+    F5: data?.project?.incomeLevel ?? "",
+    F15: Number(data?.project?.longFeet || 0),
+    C22: data?.project?.pnp ?? "",
+    C25: Number(data?.reference?.referenceSalesPerDay || 0),
+    C26: Number(data?.reference?.referenceFootfall || 0),
+    C27: Number(data?.reference?.referenceBasket || 0),
+    C28: Number(data?.reference?.referenceProfit || 0),
+    C31: Number(model?.inputs?.dailySales || 0),
+    C33: Number(data?.project?.existingOutlets || 0),
+    H39: Number(model?.inputs?.dailySales || 0),
+  };
+
+  // Auto-mode cells keep the template formula. Manual overrides above replace
+  // the formula with the entered value, so only refresh these caches in auto.
+  if (optionalWorkbookValue(data?.project?.gpPercentOverride) === undefined) {
+    forecastFormulaCaches.C23 = Number(model?.inputs?.gpPercent || 0);
+  }
+  if (optionalWorkbookValue(data?.information?.basketSizeOverride) === undefined) {
+    forecastFormulaCaches.C30 = Number(model?.inputs?.basketSize || 0);
+  }
+  if (optionalWorkbookValue(data?.information?.footfallOverride) === undefined) {
+    forecastFormulaCaches.C32 = Number(model?.inputs?.dailyFootfall || 0);
+  }
+
+  const forecastCalculatedFormulas = {};
+  (model?.forecastScore?.rows || []).slice(0, 14).forEach((row, index) => {
+    const excelRow = index + 4;
+    forecastFormulaCaches[`H${excelRow}`] = Number(row.mark || 0);
+    forecastCalculatedFormulas[`I${excelRow}`] = dashboardFormulaSpec(
+      `(H${excelRow}/D${excelRow})*C${excelRow}`,
+      Number(row.mark || 0) * Number(row.weight || 0) / 100,
+    );
+  });
+  forecastCalculatedFormulas.I18 = dashboardFormulaSpec(
+    "SUM(I4:I17)",
+    Number(model?.forecastScore?.total || 0) / 100,
+  );
+
+  (model?.categories || []).slice(0, 18).forEach((category, index) => {
+    // Row 29 is a visual separator in the source forecasting sheet.
+    const excelRow = index < 8 ? index + 21 : index + 22;
+    forecastCalculatedFormulas[`H${excelRow}`] = dashboardFormulaSpec(
+      `(IF($C$22="Y",U${excelRow},V${excelRow}))*$H$39`,
+      Number(category.perDaySales || 0),
+    );
+    forecastCalculatedFormulas[`I${excelRow}`] = dashboardFormulaSpec(
+      `H${excelRow}*30`,
+      Number(category.monthlySales || 0),
+    );
+  });
+  forecastCalculatedFormulas.I39 = dashboardFormulaSpec(
+    "H39*30",
+    Number(model?.inputs?.monthlySales || 0),
+  );
+
+  refreshWorksheetFormulaCaches(
+    zip,
+    paths.get("Sales forecasting tools"),
+    forecastFormulaCaches,
+  );
+  patchWorksheetFormulas(
+    zip,
+    paths.get("Sales forecasting tools"),
+    forecastCalculatedFormulas,
+  );
 
   const informationValues = {
     B7: Number(model?.inputs?.gpShare ?? data?.reference?.autoGpShareFr ?? 0),
@@ -1668,6 +1779,30 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     patchWorksheetValues(zip, paths.get("INFORMATION"), manualQuantities);
   }
   patchWorksheetFormulas(zip, paths.get("INFORMATION"), informationFormulas);
+
+  const informationFormulaCaches = {
+    B4: data?.project?.locationArea ?? "",
+    B6: Number(data?.project?.sft || 0),
+    B8: Number(model?.inputs?.dailySales || 0),
+    B9: Number(model?.inputs?.monthlySales || 0),
+    B10: Number(model?.inputs?.gpPercent || 0),
+    B11: Number(model?.inputs?.basketSize || 0),
+    B12: Number(model?.inputs?.dailyFootfall || 0),
+    B14: data?.project?.pnp ?? "",
+    B15: Number(data?.project?.monthlyRent || 0),
+    B16: Number(data?.project?.advance || 0),
+  };
+  if (optionalWorkbookValue(data?.information?.cepValueOverride) === undefined) {
+    informationFormulaCaches.B17 = Number(model?.inputs?.cepValue || 0);
+  }
+  if (optionalWorkbookValue(data?.information?.decorationCostOverride) === undefined) {
+    informationFormulaCaches.B19 = Number(model?.inputs?.decorationCost || 0);
+  }
+  refreshWorksheetFormulaCaches(
+    zip,
+    paths.get("INFORMATION"),
+    informationFormulaCaches,
+  );
 
   const feasibilityPatch = buildDashboardFeasibilityPatch(data, model);
   patchWorksheetValues(zip, paths.get("AUTO GENERATED FEASIBILITY"), feasibilityPatch.values);
