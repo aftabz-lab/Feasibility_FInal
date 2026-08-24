@@ -144,6 +144,136 @@ async function toBase64(asset) {
   return null;
 }
 
+const APPROVAL_SNAPSHOT_WIDTH = 1800;
+const APPROVAL_SNAPSHOT_HEIGHT = 370;
+const APPROVAL_SNAPSHOT_START_ROW = 95;
+const APPROVAL_SNAPSHOT_END_ROW = 107;
+
+function escapeSvgText(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function wrapSnapshotText(value, maxCharacters) {
+  const words = String(value || "").trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return [""];
+  const lines = [];
+  let current = "";
+  words.forEach((word) => {
+    const candidate = current ? `${current} ${word}` : word;
+    if (!current || candidate.length <= maxCharacters) {
+      current = candidate;
+    } else {
+      lines.push(current);
+      current = word;
+    }
+  });
+  if (current) lines.push(current);
+  if (lines.length <= 2) return lines;
+  return [lines[0], `${lines.slice(1).join(" ").slice(0, Math.max(1, maxCharacters - 1)).trim()}…`];
+}
+
+function snapshotText(x, y, value, options = {}) {
+  const size = options.size || 22;
+  const weight = options.bold ? 700 : 400;
+  const color = options.color || "#1F2937";
+  const maxWidth = options.maxWidth || 360;
+  const text = escapeSvgText(value);
+  const fit = String(value || "").length > (options.fitAfter || 28)
+    ? ` textLength="${maxWidth}" lengthAdjust="spacingAndGlyphs"`
+    : "";
+  return `<text x="${x}" y="${y}" text-anchor="middle" font-family="Aptos, Arial, sans-serif" font-size="${size}" font-weight="${weight}" fill="${color}"${fit}>${text}</text>`;
+}
+
+export function approvalSnapshotSvg(model) {
+  const signatories = Array.isArray(model?.signatories) ? model.signatories.slice(0, 7) : [];
+  const rows = [
+    { people: signatories.slice(0, 4), baselineY: 88, lineWidth: 350, designationY: 165, wrapAt: 34 },
+    { people: signatories.slice(4, 7), baselineY: 238, lineWidth: 430, designationY: 315, wrapAt: 44 },
+  ];
+  const blocks = [];
+
+  rows.forEach((row) => {
+    const count = row.people.length;
+    if (!count) return;
+    const gap = (APPROVAL_SNAPSHOT_WIDTH - row.lineWidth * count) / (count + 1);
+    row.people.forEach((person, index) => {
+      const lineX = gap * (index + 1) + row.lineWidth * index;
+      const centerX = lineX + row.lineWidth / 2;
+      const designationLines = wrapSnapshotText(person?.designation, row.wrapAt);
+      blocks.push(
+        `<line x1="${lineX}" y1="${row.baselineY}" x2="${lineX + row.lineWidth}" y2="${row.baselineY}" stroke="#1F2937" stroke-width="2" stroke-dasharray="8 7"/>`,
+        snapshotText(centerX, row.baselineY + 32, person?.role || "", { size: 19, color: "#5B6B7B", maxWidth: row.lineWidth - 18, fitAfter: 36 }),
+        snapshotText(centerX, row.baselineY + 57, person?.name || "", { size: 20, bold: true, maxWidth: row.lineWidth - 18, fitAfter: count === 4 ? 25 : 34 }),
+        ...designationLines.map((line, lineIndex) => snapshotText(
+          centerX,
+          row.designationY + lineIndex * 21,
+          line,
+          { size: 16, color: "#5B6B7B", maxWidth: row.lineWidth - 18, fitAfter: row.wrapAt },
+        )),
+      );
+    });
+  });
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${APPROVAL_SNAPSHOT_WIDTH}" height="${APPROVAL_SNAPSHOT_HEIGHT}" viewBox="0 0 ${APPROVAL_SNAPSHOT_WIDTH} ${APPROVAL_SNAPSHOT_HEIGHT}">
+    <rect width="${APPROVAL_SNAPSHOT_WIDTH}" height="${APPROVAL_SNAPSHOT_HEIGHT}" fill="#FFFFFF"/>
+    <rect x="1" y="1" width="${APPROVAL_SNAPSHOT_WIDTH - 2}" height="${APPROVAL_SNAPSHOT_HEIGHT - 2}" fill="none" stroke="#9EA9B5" stroke-width="2"/>
+    <rect x="1" y="1" width="${APPROVAL_SNAPSHOT_WIDTH - 2}" height="42" fill="#FFFFFF" stroke="#9EA9B5" stroke-width="2"/>
+    ${snapshotText(APPROVAL_SNAPSHOT_WIDTH / 2, 29, "APPROVAL & SIGNATURES", { size: 20, bold: true, color: "#17324D", maxWidth: 680, fitAfter: 60 })}
+    ${blocks.join("\n")}
+  </svg>`;
+}
+
+function dataUrlToBytes(dataUrl) {
+  const base64 = String(dataUrl || "").split(",")[1] || "";
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+function bytesToBase64(bytes) {
+  const source = asUint8Array(bytes);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < source.length; offset += chunkSize) {
+    binary += String.fromCharCode(...source.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function buildApprovalSnapshotPng(model) {
+  if (typeof document === "undefined" || typeof Image === "undefined") {
+    throw new Error("The approval snapshot requires a browser window.");
+  }
+  const svgBlob = new Blob([approvalSnapshotSvg(model)], { type: "image/svg+xml;charset=utf-8" });
+  const sourceUrl = URL.createObjectURL(svgBlob);
+  try {
+    const image = new Image();
+    image.decoding = "sync";
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = () => reject(new Error("Could not render the approval snapshot."));
+      image.src = sourceUrl;
+    });
+    const canvas = document.createElement("canvas");
+    canvas.width = APPROVAL_SNAPSHOT_WIDTH;
+    canvas.height = APPROVAL_SNAPSHOT_HEIGHT;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Could not create the approval snapshot canvas.");
+    context.fillStyle = "#FFFFFF";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return dataUrlToBytes(canvas.toDataURL("image/png"));
+  } finally {
+    URL.revokeObjectURL(sourceUrl);
+  }
+}
+
 async function placeSignature(workbook, worksheet, asset, col, row, width = 118, height = 45) {
   const base64 = await toBase64(asset);
   if (!base64) return;
@@ -410,7 +540,7 @@ async function addInformationSheet(workbook, data, model, assets, exportedAt) {
   sheet.pageSetup.printArea = `A1:G${totalRow.number}`;
 }
 
-async function addFeasibilitySheet(workbook, data, model, assets, exportedAt) {
+async function addFeasibilitySheet(workbook, data, model, assets, exportedAt, approvalSnapshotPng) {
   const sheet = workbook.addWorksheet("AUTO GENERATED FEASIBILITY", { properties: { defaultRowHeight: 18 } });
   sheet.views = [{ showGridLines: false, state: "frozen", ySplit: 2, xSplit: 2 }];
   sheet.pageSetup = { orientation: "portrait", paperSize: 8, fitToPage: true, fitToWidth: 1, fitToHeight: 1, margins: { left: 0.2, right: 0.2, top: 0.3, bottom: 0.3, header: 0.1, footer: 0.1 } };
@@ -523,9 +653,24 @@ async function addFeasibilitySheet(workbook, data, model, assets, exportedAt) {
     row.getCell(3).border = border();
   });
 
-  // Keep AUTO GENERATED FEASIBILITY limited to the calculation section only.
-  // The previous signatory rows 94-105 and all signature drawings are excluded.
-  sheet.pageSetup.printArea = `A1:L${rowIndex + metrics.length - 1}`;
+  // Excel receives one clean, static copy of the PDF approval section.  It is
+  // deliberately built without ink/signature assets, so the Excel report
+  // cannot inherit the scattered source-workbook signature pictures.
+  for (let row = APPROVAL_SNAPSHOT_START_ROW; row <= APPROVAL_SNAPSHOT_END_ROW; row += 1) {
+    sheet.getRow(row).height = 14.4;
+  }
+  if (approvalSnapshotPng?.length) {
+    const imageId = workbook.addImage({
+      base64: bytesToBase64(approvalSnapshotPng),
+      extension: "png",
+    });
+    const width = feasibilityWidths.reduce((total, value) => total + columnWidthToPixels(value), 0);
+    sheet.addImage(imageId, {
+      tl: { col: 0, row: APPROVAL_SNAPSHOT_START_ROW - 1 },
+      ext: { width, height: Math.round(width * APPROVAL_SNAPSHOT_HEIGHT / APPROVAL_SNAPSHOT_WIDTH) },
+    });
+  }
+  sheet.pageSetup.printArea = `A1:L${APPROVAL_SNAPSHOT_END_ROW}`;
 }
 
 export async function buildValuesOnlyWorkbook(data, model, assets = []) {
@@ -535,9 +680,10 @@ export async function buildValuesOnlyWorkbook(data, model, assets = []) {
   workbook.creator = "Shwapno Feasibility Dashboard";
   workbook.created = exportedAt;
   workbook.modified = exportedAt;
+  const approvalSnapshotPng = await buildApprovalSnapshotPng(model);
   await addScoreSheet(workbook, data, model, assets, exportedAt);
   await addInformationSheet(workbook, data, model, assets, exportedAt);
-  await addFeasibilitySheet(workbook, data, model, assets, exportedAt);
+  await addFeasibilitySheet(workbook, data, model, assets, exportedAt, approvalSnapshotPng);
   return workbook;
 }
 
@@ -1069,6 +1215,242 @@ function removeWorksheetDrawings(zip, path) {
   writeXmlContent(relEntry, relXml);
 }
 
+function upsertZipEntry(zip, path, content) {
+  const bytes = asUint8Array(content);
+  const current = zipEntry(zip, path);
+  if (current) {
+    current.content = bytes;
+    current.size = bytes.length;
+    return;
+  }
+  const cfbApi = getCfbApi();
+  if (!cfbApi.utils?.cfb_add) throw new Error("The workbook package cannot add the approval snapshot.");
+  cfbApi.utils.cfb_add(zip, path, bytes);
+}
+
+function packageEntryPaths(zip) {
+  return (zip?.FullPaths || [])
+    .map((path) => String(path || "").replace(/^Root Entry\//, "").replace(/\/$/, ""))
+    .filter(Boolean);
+}
+
+function deleteZipEntry(zip, path) {
+  const cfbApi = getCfbApi();
+  const fullPath = (zip?.FullPaths || []).find((candidate) =>
+    String(candidate || "").replace(/^Root Entry\//, "").replace(/\/$/, "") === path
+  );
+  if (fullPath) cfbApi.utils.cfb_del(zip, fullPath);
+}
+
+function resolvePackageTarget(ownerPath, target) {
+  const parts = String(ownerPath || "").split("/").slice(0, -1);
+  String(target || "").replace(/\\/g, "/").split("/").forEach((part) => {
+    if (!part || part === ".") return;
+    if (part === "..") parts.pop();
+    else parts.push(part);
+  });
+  return parts.join("/");
+}
+
+function relationshipOwnerPath(relPath) {
+  return String(relPath || "")
+    .replace(/\/_rels\/([^/]+)\.rels$/i, "/$1");
+}
+
+function relationshipTargets(zip, relPath, relationshipTypeSuffix) {
+  const entry = zipEntry(zip, relPath);
+  if (!entry) return [];
+  const ownerPath = relationshipOwnerPath(relPath);
+  const targets = [];
+  const pattern = /<Relationship\b[^>]*\/\s*>/gi;
+  let match;
+  const xml = readXmlContent(entry);
+  while ((match = pattern.exec(xml))) {
+    const tag = match[0];
+    const type = xmlAttribute(tag, "Type");
+    const target = xmlAttribute(tag, "Target");
+    if (target && type.endsWith(relationshipTypeSuffix)) {
+      targets.push(resolvePackageTarget(ownerPath, target));
+    }
+  }
+  return targets;
+}
+
+function drawingRelationshipsPath(drawingPath) {
+  const slash = drawingPath.lastIndexOf("/");
+  return `${drawingPath.slice(0, slash)}/_rels/${drawingPath.slice(slash + 1)}.rels`;
+}
+
+function purgeUnreferencedSignatureDrawings(zip) {
+  const cfbApi = getCfbApi();
+  if (!cfbApi.utils?.cfb_del) return;
+  const paths = packageEntryPaths(zip);
+  const worksheetRelPaths = paths.filter((path) => /^xl\/worksheets\/_rels\/[^/]+\.xml\.rels$/i.test(path));
+  const referencedDrawings = new Set(
+    worksheetRelPaths.flatMap((path) => relationshipTargets(zip, path, "/drawing")),
+  );
+  const drawingPaths = paths.filter((path) => /^xl\/drawings\/drawing[^/]*\.xml$/i.test(path));
+  const deletedDrawingPaths = drawingPaths.filter((path) => !referencedDrawings.has(path));
+  const candidateMedia = new Set();
+
+  deletedDrawingPaths.forEach((drawingPath) => {
+    const relPath = drawingRelationshipsPath(drawingPath);
+    relationshipTargets(zip, relPath, "/image").forEach((path) => candidateMedia.add(path));
+    deleteZipEntry(zip, relPath);
+    deleteZipEntry(zip, drawingPath);
+  });
+
+  const mediaStillUsed = new Set();
+  [...referencedDrawings].forEach((drawingPath) => {
+    relationshipTargets(zip, drawingRelationshipsPath(drawingPath), "/image")
+      .forEach((path) => mediaStillUsed.add(path));
+  });
+  candidateMedia.forEach((mediaPath) => {
+    if (!mediaStillUsed.has(mediaPath)) deleteZipEntry(zip, mediaPath);
+  });
+
+  if (deletedDrawingPaths.length) {
+    const contentTypesEntry = zipEntry(zip, "[Content_Types].xml");
+    if (contentTypesEntry) {
+      let xml = readXmlContent(contentTypesEntry);
+      deletedDrawingPaths.forEach((drawingPath) => {
+        const escaped = `/${drawingPath}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        xml = xml.replace(
+          new RegExp(`<Override\\b(?=[^>]*\\bPartName="${escaped}")[^>]*\\/\\s*>`, "gi"),
+          "",
+        );
+      });
+      writeXmlContent(contentTypesEntry, xml);
+    }
+  }
+}
+
+function clearWorksheetRowsForSnapshot(zip, path, startRow, endRow, finalRow) {
+  const entry = zipEntry(zip, path);
+  if (!entry) throw new Error(`The master workbook is missing ${path}.`);
+  let xml = readXmlContent(entry);
+
+  for (let rowNumber = startRow; rowNumber <= endRow; rowNumber += 1) {
+    const rowPattern = new RegExp(
+      `<row\\b(?=[^>]*\\br="${rowNumber}")[^>]*>[\\s\\S]*?<\\/row>`,
+      "gi",
+    );
+    xml = xml.replace(rowPattern, (rowXml) => rowXml.replace(
+      /<c\b[^>]*\/>|<c\b(?![^>]*\/>)\s*[^>]*>[\s\S]*?<\/c>/gi,
+      (cellXml) => {
+        const opening = cellXml.match(/^<c\b[^>]*/i)?.[0] || "<c";
+        const blankOpening = opening
+          .replace(/\s+t="[^"]*"/gi, "")
+          .replace(/\/\s*$/, "");
+        return `${blankOpening}/>`;
+      },
+    ));
+  }
+
+  // A two-cell image anchor must terminate on a real worksheet row for
+  // consistent rendering in Excel, LibreOffice and mobile spreadsheet apps.
+  for (let rowNumber = endRow + 1; rowNumber <= finalRow; rowNumber += 1) {
+    const existingRow = new RegExp(`<row\\b(?=[^>]*\\br="${rowNumber}")[^>]*(?:\\/\\s*>|>[\\s\\S]*?<\\/row>)`, "i");
+    if (!existingRow.test(xml)) {
+      xml = xml.replace(
+        /<\/sheetData>/i,
+        `<row r="${rowNumber}" spans="1:12" ht="14.4" customHeight="1"/></sheetData>`,
+      );
+    }
+  }
+
+  // Do not leave signatory cell merges beneath the single snapshot picture.
+  xml = xml.replace(/<mergeCell\b[^>]*\bref="([^"]+)"[^>]*\/\s*>/gi, (tag, reference) => {
+    const rows = [...String(reference).matchAll(/\$?[A-Z]+\$?(\d+)/gi)].map((match) => Number(match[1]));
+    return rows.some((row) => row >= startRow && row <= endRow) ? "" : tag;
+  });
+  xml = xml.replace(/<dimension\b[^>]*\bref="([^"]+)"[^>]*\/\s*>/i, (tag, reference) => {
+    const revised = String(reference).replace(/(\$?[A-Z]+\$?)\d+$/, `$1${finalRow}`);
+    return tag.replace(reference, revised);
+  });
+  writeXmlContent(entry, xml);
+}
+
+function addApprovalSnapshotDrawing(zip, sheetPath, pngBytes) {
+  if (!pngBytes?.length) throw new Error("The approval snapshot image is empty.");
+  const worksheetEntry = zipEntry(zip, sheetPath);
+  if (!worksheetEntry) throw new Error(`The master workbook is missing ${sheetPath}.`);
+
+  const sheetSlash = sheetPath.lastIndexOf("/");
+  const sheetFolder = sheetPath.slice(0, sheetSlash);
+  const sheetFile = sheetPath.slice(sheetSlash + 1);
+  const sheetRelPath = `${sheetFolder}/_rels/${sheetFile}.rels`;
+  // Use Excel's conventional numeric relationship id.  LibreOffice also
+  // requires this form when resolving a newly-added worksheet drawing.
+  const relationshipId = "rId5";
+  const drawingPath = "xl/drawings/drawingApprovalSnapshot.xml";
+  const drawingRelPath = "xl/drawings/_rels/drawingApprovalSnapshot.xml.rels";
+  const mediaPath = "xl/media/approval-signature-section.png";
+
+  let worksheetXml = readXmlContent(worksheetEntry)
+    .replace(/<drawing\b[^>]*\br:id="[^"]+"[^>]*\/?>/gi, "");
+  const drawingTag = `<drawing r:id="${relationshipId}"/>`;
+  const insertionPoint = /<(?:legacyDrawing|legacyDrawingHF|picture|oleObjects|controls|webPublishItems|tableParts|extLst)\b/i;
+  if (insertionPoint.test(worksheetXml)) {
+    worksheetXml = worksheetXml.replace(insertionPoint, `${drawingTag}$&`);
+  } else {
+    worksheetXml = worksheetXml.replace(/<\/worksheet>\s*$/i, `${drawingTag}</worksheet>`);
+  }
+  writeXmlContent(worksheetEntry, worksheetXml);
+
+  const existingRelEntry = zipEntry(zip, sheetRelPath);
+  let relationshipXml = existingRelEntry
+    ? readXmlContent(existingRelEntry)
+    : '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
+  relationshipXml = relationshipXml.replace(
+    /<Relationship\b(?=[^>]*\bType="[^"]*\/drawing")[^>]*\/\s*>/gi,
+    "",
+  );
+  relationshipXml = relationshipXml.replace(
+    /<\/Relationships>\s*$/i,
+    `<Relationship Id="${relationshipId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawingApprovalSnapshot.xml"/></Relationships>`,
+  );
+  upsertZipEntry(zip, sheetRelPath, new TextEncoder().encode(relationshipXml));
+
+  const drawingXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <xdr:twoCellAnchor editAs="oneCell">
+    <xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${APPROVAL_SNAPSHOT_START_ROW - 1}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:to><xdr:col>12</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${APPROVAL_SNAPSHOT_END_ROW}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+    <xdr:pic>
+      <xdr:nvPicPr><xdr:cNvPr id="1" name="PDF approval section - no signatures" descr="Approval and signatory details without signature images"/><xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>
+      <xdr:blipFill><a:blip r:embed="rId1" cstate="print"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>
+      <xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>
+    </xdr:pic>
+    <xdr:clientData/>
+  </xdr:twoCellAnchor>
+</xdr:wsDr>`;
+  const drawingRelationships = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/approval-signature-section.png"/>
+</Relationships>`;
+  upsertZipEntry(zip, drawingPath, new TextEncoder().encode(drawingXml));
+  upsertZipEntry(zip, drawingRelPath, new TextEncoder().encode(drawingRelationships));
+  upsertZipEntry(zip, mediaPath, pngBytes);
+
+  const contentTypesEntry = zipEntry(zip, "[Content_Types].xml");
+  if (!contentTypesEntry) throw new Error("The master workbook is missing [Content_Types].xml.");
+  let contentTypesXml = readXmlContent(contentTypesEntry);
+  if (!/<Default\b(?=[^>]*\bExtension="png")[^>]*\/>/i.test(contentTypesXml)) {
+    contentTypesXml = contentTypesXml.replace(
+      /<\/Types>\s*$/i,
+      '<Default Extension="png" ContentType="image/png"/></Types>',
+    );
+  }
+  if (!contentTypesXml.includes('/xl/drawings/drawingApprovalSnapshot.xml')) {
+    contentTypesXml = contentTypesXml.replace(
+      /<\/Types>\s*$/i,
+      '<Override PartName="/xl/drawings/drawingApprovalSnapshot.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>',
+    );
+  }
+  writeXmlContent(contentTypesEntry, contentTypesXml);
+}
+
 function removeWorksheetRows(zip, path, startRow, endRow) {
   const entry = zipEntry(zip, path);
   if (!entry) throw new Error(`The master workbook is missing ${path}.`);
@@ -1567,7 +1949,7 @@ function buildDashboardFeasibilityPatch(data, model) {
   return { values, formulas };
 }
 
-export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt) {
+export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt, approvalSnapshotPng = null) {
   const cfbApi = getCfbApi();
   const zip = cfbApi.read(asUint8Array(templateBuffer), { type: "array" });
   const { paths, workbookEntry, workbookXml } = worksheetPaths(zip);
@@ -1810,17 +2192,32 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
   removeOrphanSharedFormulaReferences(zip, paths.get("AUTO GENERATED FEASIBILITY"));
   hideWorksheetRows(zip, paths.get("AUTO GENERATED FEASIBILITY"), [66, 67]);
 
-  // Excel output only: remove every signature drawing from the report sheets.
-  // The complete signatory section at rows 94-105 is also removed from the
-  // Auto Generated Feasibility sheet. Dashboard/PDF rules remain unchanged.
-  REPORT_SHEET_NAMES.forEach((name) => removeWorksheetDrawings(zip, paths.get(name)));
-  removeWorksheetRows(zip, paths.get("AUTO GENERATED FEASIBILITY"), 94, 105);
+  // Excel output only: remove source signature drawings from the first two
+  // report sheets.  On AUTO GENERATED FEASIBILITY, replace the old scattered
+  // cells/connectors/signature pictures with one clean snapshot of the PDF's
+  // approval section.  The snapshot never receives signature/ink assets.
+  REPORT_SHEET_NAMES
+    .filter((name) => !sameSheetName(name, "AUTO GENERATED FEASIBILITY"))
+    .forEach((name) => removeWorksheetDrawings(zip, paths.get(name)));
+  clearWorksheetRowsForSnapshot(
+    zip,
+    paths.get("AUTO GENERATED FEASIBILITY"),
+    APPROVAL_SNAPSHOT_START_ROW,
+    105,
+    APPROVAL_SNAPSHOT_END_ROW,
+  );
+  addApprovalSnapshotDrawing(
+    zip,
+    paths.get("AUTO GENERATED FEASIBILITY"),
+    approvalSnapshotPng,
+  );
+  purgeUnreferencedSignatureDrawings(zip);
 
   REPORT_SHEET_NAMES.forEach((name) => patchWorksheetFooter(zip, paths.get(name), exportedAt));
   const workbookWithPrintArea = setWorksheetPrintArea(
     workbookXml,
     "AUTO GENERATED FEASIBILITY",
-    "'AUTO GENERATED FEASIBILITY'!$A$1:$L$93",
+    `'AUTO GENERATED FEASIBILITY'!$A$1:$L$${APPROVAL_SNAPSHOT_END_ROW}`,
   );
   writeXmlContent(
     workbookEntry,
@@ -1868,7 +2265,14 @@ export async function downloadRulesWorkbook(
     const configuredWorkbook = await getConfiguredRulesWorkbook();
     templateBuffer = configuredWorkbook.buffer;
   }
-  const buffer = buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt);
+  const approvalSnapshotPng = await buildApprovalSnapshotPng(model);
+  const buffer = buildRulesWorkbookBuffer(
+    templateBuffer,
+    data,
+    model,
+    exportedAt,
+    approvalSnapshotPng,
+  );
 
   const blob = new Blob(
     [buffer],
