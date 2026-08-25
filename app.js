@@ -574,7 +574,7 @@ function ceil1000(value) {
 function runAutoCorrect() {
   captureFirstFeasibilityEntry();
   const base = state.firstFeasibilityEntry;
-  const maxSales = base.sales + 15000;
+  const maxSales = Math.max(base.sales + 15000, base.sales * 3);
   const startingSales = Math.min(Math.max(Number(state.data.project.projectedDailySales) || base.sales, base.sales), maxSales);
 
   let solved = false;
@@ -614,7 +614,7 @@ function runAutoCorrect() {
     kind: "ready",
     message: solved
       ? `Auto Correct completed at minimum required sales: ${formatMoney(selectedSales)}.`
-      : "Auto Correct reached the maximum allowed sales adjustment.",
+      : "Auto Correct reached the current search limit; feasibility may require further commercial review.",
   };
   render();
 }
