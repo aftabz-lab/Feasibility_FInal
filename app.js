@@ -22,7 +22,7 @@ const workbookInput = document.querySelector("#workbook-file");
 const signatureInput = document.querySelector("#signature-file");
 
 const state = {
-  view: "overview",
+  view: "entry",
   data: cloneData(defaultData),
   model: calculateModel(defaultData),
   signatureAssets: [],
@@ -49,13 +49,64 @@ const blankInitialSelectionPaths = Object.freeze([
 ]);
 
 const VIEWS = [
-  ["overview", "Dashboard"],
   ["entry", "Data Entry"],
+  ["overview", "Dashboard"],
   ["forecast", "Sales Forecasting"],
   ["information", "Information"],
   ["feasibility", "Auto Feasibility"],
   ["help", "Guide"],
 ];
+
+const FEASIBILITY_RATIO_PATHS = new Set([
+  "project.projectedDailySales",
+  "project.monthlyRent",
+  "project.advance",
+]);
+
+function installRuntimeStyles() {
+  if (document.querySelector("#feasibility-header-control-styles")) return;
+  const style = document.createElement("style");
+  style.id = "feasibility-header-control-styles";
+  style.textContent = `
+    .header-model-tools {
+      display: flex;
+      flex: 0 0 auto;
+      align-items: center;
+      gap: 9px;
+      white-space: nowrap;
+    }
+    .header-auto-feasibility {
+      display: grid;
+      gap: 4px;
+      padding: 6px 8px;
+      border: 1px solid #294a63;
+      border-radius: 10px;
+      background: rgba(13, 31, 47, 0.82);
+    }
+    .header-auto-feasibility-label {
+      color: #d8e9f7;
+      font-size: 0.61rem;
+      font-weight: 800;
+      letter-spacing: 0.025em;
+    }
+    .header-auto-feasibility .auto-feas-control { margin: 0; }
+    .header-auto-feasibility .auto-feas-dot {
+      min-width: 52px;
+      height: 24px;
+      padding: 0 10px;
+      font-size: 0.64rem;
+    }
+    .header-auto-feasibility .btn {
+      min-height: 31px;
+      padding: 0 12px;
+      font-size: 0.76rem;
+    }
+    @media (max-width: 560px) {
+      .header-model-tools { width: 100%; flex-wrap: wrap; }
+    }
+  `;
+  document.head.appendChild(style);
+}
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -155,7 +206,10 @@ function headerHtml() {
           </div>
         </div>
         <div class="top-actions">
-          <div class="mode-chip">${escapeHtml(mode)}</div>
+          <div class="header-model-tools">
+            <div class="mode-chip">${escapeHtml(mode)}</div>
+            ${autoFeasibilityControlHtml()}
+          </div>
           <button class="btn btn-secondary" type="button" data-action="upload-workbook">Load Excel</button>
           <button class="btn btn-primary" type="button" data-action="download-rules-xlsx">Download Excel with Rules</button>
           <button class="btn btn-pdf" type="button" data-action="download-pdf">Download 3-page PDF</button><button class="btn btn-secondary" type="button" data-action="share-pdf">Share PDF</button>
@@ -451,7 +505,6 @@ function renderDataEntry() {
           ? "Headcount follows monthly sales using the Shwapno manpower matrix. Editing any quantity switches this table to manual."
           : "Manual mode: headcount is no longer driven by sales. Tick the box to hand control back to the matrix.",
           `<label class="inline-check"><input type="checkbox" data-action="manpower-auto"${manpowerAuto ? " checked" : ""}> Auto headcount from monthly sales${manpowerAuto ? ` &middot; ${yesFlagLabel} &middot; ${escapeHtml(manpowerBandLabel(monthlySalesForBand, state.data.project.pnp))}` : ""}</label><div class="table-scroll"><table class="input-table"><thead><tr><th>Position</th><th>Qty</th><th>Salary</th><th>Total</th></tr></thead><tbody>${staffRows}</tbody></table></div>`)}
-        ${sectionCard("Auto feasibility control", "Automatic feasibility status and correction tools.", `<div class="auto-feas-control"><span class="auto-feas-dot ${autoFeasibilityStatus()}">${autoFeasibilityStatus() === "green" ? "GREEN" : "RED"}</span><button class="btn btn-primary" type="button" data-action="auto-correct">Auto Correct</button></div>`)}
         ${sectionCard("Auto feasibility assumptions", "Editable financial drivers used by the output report.", `<details open><summary>Growth, stock and margin</summary><div class="field-grid three">
           ${textField("Stock / SFT", "advanced.stockPerSft", { type: "number", min: 0, step: 1 })}
           ${textField("GP annual step", "advanced.gpAnnualStep", { type: "number", min: 0, max: 1, step: 0.0001 })}
@@ -549,39 +602,71 @@ function feasibilityCellHtml(row, value, timeIndex, model, isTotal = false) {
 }
 
 
-function autoFeasibilityStatus() {
-  const rows = state.model?.rows || [];
+function autoFeasibilityResult(model = state.model) {
+  const rows = model?.rows || [];
   const failed = rows.some((row) => {
     if (!row || row.type === "heading" || !row.emphasis) return false;
     return row.values?.some((v) => Number(v) < 0) || (row.total !== null && row.total !== undefined && Number(row.total) < 0);
   });
-  return failed ? "red" : "green";
-}
-
-function captureFirstFeasibilityEntry() {
-  if (state.firstFeasibilityEntry) return;
-  state.firstFeasibilityEntry = {
-    sales: Number(state.data.project.projectedDailySales) || 0,
-    rent: Number(state.data.project.monthlyRent) || 0,
-    advance: Number(state.data.project.advance) || 0
+  const comparisonWarning = Boolean(model?.alerts?.franchisePbtAboveOutletPlYear1);
+  return {
+    passes: !failed && !comparisonWarning,
+    failed,
+    comparisonWarning,
   };
 }
 
-function runAutoCorrect() {
-  captureFirstFeasibilityEntry();
-  const base = state.firstFeasibilityEntry;
-  let sales = Math.ceil((Number(state.data.project.projectedDailySales) || base.sales) / 1000) * 1000;
-  const maxIterations = 120;
+function autoFeasibilityStatus(model = state.model) {
+  return autoFeasibilityResult(model).passes ? "green" : "red";
+}
 
-  // Search upward for the minimum sales required. No fixed +15,000 ceiling.
-  for (let i = 0; i < maxIterations; i++) {
+function autoFeasibilityControlHtml() {
+  const status = autoFeasibilityStatus();
+  return `<div class="header-auto-feasibility"><span class="header-auto-feasibility-label">Auto feasibility control</span><div class="auto-feas-control"><span class="auto-feas-dot ${status}">${status === "green" ? "GREEN" : "RED"}</span><button class="btn btn-primary" type="button" data-action="auto-correct">Auto Correct</button></div></div>`;
+}
+
+function currentFeasibilityEntry() {
+  return {
+    sales: Number(state.data.project.projectedDailySales) || 0,
+    rent: Number(state.data.project.monthlyRent) || 0,
+    advance: Number(state.data.project.advance) || 0,
+  };
+}
+
+function captureFirstFeasibilityEntry() {
+  if (!state.firstFeasibilityEntry) state.firstFeasibilityEntry = currentFeasibilityEntry();
+  return state.firstFeasibilityEntry;
+}
+
+function captureManualFeasibilityEntry() {
+  state.firstFeasibilityEntry = currentFeasibilityEntry();
+}
+
+function roundUpToThousand(value) {
+  return Math.ceil(Math.max(0, Number(value) || 0) / 1000) * 1000;
+}
+
+function runAutoCorrect() {
+  const base = captureFirstFeasibilityEntry();
+  if (base.sales <= 0) {
+    state.status = { kind: "warning", message: "Enter Projected Per Day Sales before using Auto Correct." };
+    render();
+    return;
+  }
+
+  let sales = roundUpToThousand(Math.max(Number(state.data.project.projectedDailySales) || 0, base.sales));
+  // This practical guard permits up to a BDT 20,000,000 increase while the
+  // actual search still checks every BDT 1,000 step and stops at the first pass.
+  const highestSalesToTest = sales + 20000000;
+
+  while (sales <= highestSalesToTest) {
     const ratio = sales / Math.max(base.sales, 1);
     state.data.project.projectedDailySales = sales;
-    state.data.project.monthlyRent = Math.ceil((base.rent * ratio) / 1000) * 1000;
-    state.data.project.advance = Math.ceil((base.advance * ratio) / 1000) * 1000;
+    state.data.project.monthlyRent = roundUpToThousand(base.rent * ratio);
+    state.data.project.advance = roundUpToThousand(base.advance * ratio);
     recalculate();
 
-    if (autoFeasibilityStatus() === "green") {
+    if (autoFeasibilityResult().passes) {
       state.status = { kind: "ready", message: "Auto Correct completed using the minimum required sales level." };
       render();
       return;
@@ -589,7 +674,7 @@ function runAutoCorrect() {
     sales += 1000;
   }
 
-  state.status = { kind: "ready", message: "Auto Correct reached the search limit. Please review assumptions." };
+  state.status = { kind: "warning", message: "The current Sales, Rent and Advance ratio cannot make every required Auto Feasibility check green. Review the three manual entry values." };
   render();
 }
 
@@ -682,7 +767,7 @@ function applyChange(target) {
     return;
   }
   setPath(state.data, path, selectedValue);
-  if (["project.projectedDailySales","project.monthlyRent","project.advance"].includes(path)) captureFirstFeasibilityEntry();
+  if (FEASIBILITY_RATIO_PATHS.has(path)) captureManualFeasibilityEntry();
   if (/^staff\.\d+\.quantity$/.test(path)) {
     // A hand-typed headcount wins over the matrix from here on.
     state.data.information.manpowerAuto = false;
@@ -741,6 +826,7 @@ async function loadWorkbookFromBuffer(buffer, sourceName) {
   }
   const workbook = XLSX.read(buffer, { type: "array", cellFormula: true, cellStyles: false, cellNF: true });
   state.data = extractFromWorkbook(workbook, sourceName);
+  state.firstFeasibilityEntry = null;
   recalculate();
 }
 
@@ -929,6 +1015,7 @@ app.addEventListener("click", (event) => {
   }
   if (actionName === "reset") {
     state.data = cloneData(defaultData);
+    state.firstFeasibilityEntry = null;
     recalculate();
     state.status = { kind: "ready", message: "Built-in baseline restored." };
     render();
@@ -988,6 +1075,7 @@ signatureInput.addEventListener("change", () => {
 });
 
 async function initialise() {
+  installRuntimeStyles();
   render();
   await Promise.all([loadSignManifest(), loadConfiguredSource()]);
   render();
