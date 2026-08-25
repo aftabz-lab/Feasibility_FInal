@@ -22,7 +22,7 @@ const workbookInput = document.querySelector("#workbook-file");
 const signatureInput = document.querySelector("#signature-file");
 
 const state = {
-  view: "entry",
+  view: "overview",
   data: cloneData(defaultData),
   model: calculateModel(defaultData),
   signatureAssets: [],
@@ -49,8 +49,8 @@ const blankInitialSelectionPaths = Object.freeze([
 ]);
 
 const VIEWS = [
-  ["entry", "Data Entry"],
   ["overview", "Dashboard"],
+  ["entry", "Data Entry"],
   ["forecast", "Sales Forecasting"],
   ["information", "Information"],
   ["feasibility", "Auto Feasibility"],
@@ -567,55 +567,29 @@ function captureFirstFeasibilityEntry() {
   };
 }
 
-function ceil1000(value) {
-  return Math.ceil(Number(value || 0) / 1000) * 1000;
-}
-
 function runAutoCorrect() {
   captureFirstFeasibilityEntry();
   const base = state.firstFeasibilityEntry;
-  const maxSales = Math.max(base.sales + 15000, base.sales * 3);
-  const startingSales = Math.min(Math.max(Number(state.data.project.projectedDailySales) || base.sales, base.sales), maxSales);
+  let sales = Math.ceil((Number(state.data.project.projectedDailySales) || base.sales) / 1000) * 1000;
+  const maxIterations = 120;
 
-  let solved = false;
-  let selectedSales = startingSales;
-
-  // Search the lowest sales value that turns the feasibility calculation positive.
-  for (let sales = ceil1000(startingSales); sales <= ceil1000(maxSales); sales += 1000) {
+  // Search upward for the minimum sales required. No fixed +15,000 ceiling.
+  for (let i = 0; i < maxIterations; i++) {
     const ratio = sales / Math.max(base.sales, 1);
-    state.data.project.projectedDailySales = ceil1000(sales);
-    state.data.project.monthlyRent = ceil1000(base.rent * ratio);
-    state.data.project.advance = ceil1000(base.advance * ratio);
+    state.data.project.projectedDailySales = sales;
+    state.data.project.monthlyRent = Math.ceil((base.rent * ratio) / 1000) * 1000;
+    state.data.project.advance = Math.ceil((base.advance * ratio) / 1000) * 1000;
     recalculate();
 
     if (autoFeasibilityStatus() === "green") {
-      selectedSales = sales;
-      solved = true;
-      break;
+      state.status = { kind: "ready", message: "Auto Correct completed using the minimum required sales level." };
+      render();
+      return;
     }
+    sales += 1000;
   }
 
-  // If sales limit is reached, keep the best allowed values and normalize rounding.
-  if (!solved) {
-    const ratio = maxSales / Math.max(base.sales, 1);
-    state.data.project.projectedDailySales = ceil1000(maxSales);
-    state.data.project.monthlyRent = ceil1000(base.rent * ratio);
-    state.data.project.advance = ceil1000(base.advance * ratio);
-    recalculate();
-  }
-
-  // Final rounding guarantee.
-  state.data.project.projectedDailySales = ceil1000(state.data.project.projectedDailySales);
-  state.data.project.monthlyRent = ceil1000(state.data.project.monthlyRent);
-  state.data.project.advance = ceil1000(state.data.project.advance);
-  recalculate();
-
-  state.status = {
-    kind: "ready",
-    message: solved
-      ? `Auto Correct completed at minimum required sales: ${formatMoney(selectedSales)}.`
-      : "Auto Correct reached the current search limit; feasibility may require further commercial review.",
-  };
+  state.status = { kind: "ready", message: "Auto Correct reached the search limit. Please review assumptions." };
   render();
 }
 

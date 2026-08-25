@@ -188,16 +188,11 @@ details { margin-top: 7px; border: 1px solid #315069; border-radius: 9px; backgr
 .status-link { margin-left: 10px; padding: 2px 10px; border: 1px solid #31546f; border-radius: 999px; color: var(--accent); font-weight: 650; text-decoration: none; font-size: 0.72rem; }
 .status-link:hover { background: rgba(49, 84, 111, 0.35); }
 
-.auto-control{display:flex;align-items:center;gap:10px;padding:8px 12px;border:1px solid var(--line);border-radius:18px;background:var(--panel)}
-.auto-control span{font-weight:700;font-size:14px}
-.auto-control b{padding:7px 12px;border-radius:10px;font-size:12px}
-.auto-control .ok{background:rgba(65,210,120,.25);color:#65d38d}
-.auto-control .bad{background:rgba(255,90,100,.25);color:#ff7b82}
-.btn-auto-correct{background:#27b66b!important;color:#fff!important;border-color:#27b66b!important}
+.auto-feas-control{display:flex;align-items:center;gap:10px;margin:8px 0}
+.auto-feas-dot{display:inline-flex;align-items:center;justify-content:center;min-width:56px;height:28px;border-radius:14px;font-size:11px;font-weight:700;color:white;padding:0 12px}
+.auto-feas-dot.green{background:#1f9d55}
+.auto-feas-dot.red{background:#d93025}
 
-
-.auto-header-control{display:flex;align-items:center;gap:10px;padding:8px 12px;border:1px solid #24506d;border-radius:12px;color:#d9ecff;background:rgba(8,20,32,.5);font-weight:750;white-space:nowrap}
-.auto-header-status{padding:7px 12px;border-radius:9px;font-size:.78rem}
-.auto-header-status.green{background:#123d32;color:#62e69b}
-.auto-header-status.red{background:#54202b;color:#ff9aa8}
-@media(max-width:900px){.auto-header-control{width:100%;justify-content:center}}
+/* Auto feasibility header control alignment */
+.auto-feas-control{display:flex;align-items:center;gap:10px;white-space:nowrap}
+.auto-feas-control .btn{flex:0 0 auto}
