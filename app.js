@@ -602,18 +602,29 @@ function feasibilityCellHtml(row, value, timeIndex, model, isTotal = false) {
 }
 
 
+function conditionalRowIsRed(row) {
+  if (!row || row.type === "heading" || !row.emphasis) return false;
+  return row.values?.some((value) => Number(value) < 0)
+    || (row.total !== null && row.total !== undefined && Number(row.total) < 0);
+}
+
 function autoFeasibilityResult(model = state.model) {
   const rows = model?.rows || [];
-  const failed = rows.some((row) => {
-    if (!row || row.type === "heading" || !row.emphasis) return false;
-    return row.values?.some((v) => Number(v) < 0) || (row.total !== null && row.total !== undefined && Number(row.total) < 0);
-  });
+  const failedRows = rows.filter(conditionalRowIsRed);
   const comparisonWarning = Boolean(model?.alerts?.franchisePbtAboveOutletPlYear1);
   return {
-    passes: !failed && !comparisonWarning,
-    failed,
+    passes: failedRows.length === 0 && !comparisonWarning,
+    failed: failedRows.length > 0,
+    failedRows,
     comparisonWarning,
   };
+}
+
+function outletFeasibilityPasses(model) {
+  const rows = model?.rows || [];
+  const franchiseHeadingIndex = rows.findIndex((row) => row?.type === "heading" && row.label === "Franchise Part");
+  const outletRows = franchiseHeadingIndex >= 0 ? rows.slice(0, franchiseHeadingIndex) : rows;
+  return !outletRows.some(conditionalRowIsRed);
 }
 
 function autoFeasibilityStatus(model = state.model) {
@@ -646,6 +657,81 @@ function roundUpToThousand(value) {
   return Math.ceil(Math.max(0, Number(value) || 0) / 1000) * 1000;
 }
 
+function evaluateAutoCorrectCandidate(workingData, sales, rent, advance) {
+  workingData.project.projectedDailySales = sales;
+  workingData.project.monthlyRent = rent;
+  workingData.project.advance = advance;
+  applyAutoManpower(workingData);
+  return calculateModel(workingData);
+}
+
+function findCostAdjustmentAtSales(workingData, sales, base) {
+  const baseRent = roundUpToThousand(base.rent);
+  const baseAdvance = roundUpToThousand(base.advance);
+  const tested = new Set();
+
+  const testCandidate = (rent, advance) => {
+    const roundedRent = roundUpToThousand(rent);
+    const roundedAdvance = roundUpToThousand(advance);
+    const key = `${roundedRent}:${roundedAdvance}`;
+    if (tested.has(key)) return null;
+    tested.add(key);
+    const model = evaluateAutoCorrectCandidate(workingData, sales, roundedRent, roundedAdvance);
+    return autoFeasibilityResult(model).passes
+      ? { sales, rent: roundedRent, advance: roundedAdvance }
+      : null;
+  };
+
+  const originalModel = evaluateAutoCorrectCandidate(workingData, sales, baseRent, baseAdvance);
+  if (!outletFeasibilityPasses(originalModel)) return { outletPasses: false, candidate: null };
+  tested.add(`${baseRent}:${baseAdvance}`);
+  if (autoFeasibilityResult(originalModel).passes) {
+    return { outletPasses: true, candidate: { sales, rent: baseRent, advance: baseAdvance } };
+  }
+
+  // Keep the entered Rent-to-Advance balance as close as possible first, but
+  // search both downward and upward. Each result is rounded upward to BDT 1,000.
+  // This fixes cases such as 57,000 / 120,000 / 2,000,000 without inflating all
+  // three values together to tens or hundreds of millions.
+  const scaleStepsPerOne = 1000;
+  const maximumUpwardScale = 10;
+  const maximumScaleStep = (maximumUpwardScale - 1) * scaleStepsPerOne;
+  for (let step = 1; step <= maximumScaleStep; step += 1) {
+    const downwardScale = 1 - step / scaleStepsPerOne;
+    if (downwardScale >= 0) {
+      const candidate = testCandidate(base.rent * downwardScale, base.advance * downwardScale);
+      if (candidate) return { outletPasses: true, candidate };
+    }
+    const upwardScale = 1 + step / scaleStepsPerOne;
+    const candidate = testCandidate(base.rent * upwardScale, base.advance * upwardScale);
+    if (candidate) return { outletPasses: true, candidate };
+  }
+
+  // Fallback for edge cases where only Rent or only Advance needs to move.
+  // Search nearest BDT 1,000 values in both directions without changing Sales.
+  const maximumRentDelta = Math.max(500000, baseRent * 4);
+  for (let delta = 1000; delta <= maximumRentDelta; delta += 1000) {
+    if (baseRent - delta >= 0) {
+      const lower = testCandidate(baseRent - delta, baseAdvance);
+      if (lower) return { outletPasses: true, candidate: lower };
+    }
+    const higher = testCandidate(baseRent + delta, baseAdvance);
+    if (higher) return { outletPasses: true, candidate: higher };
+  }
+
+  const maximumAdvanceDelta = Math.max(5000000, baseAdvance * 4);
+  for (let delta = 1000; delta <= maximumAdvanceDelta; delta += 1000) {
+    if (baseAdvance - delta >= 0) {
+      const lower = testCandidate(baseRent, baseAdvance - delta);
+      if (lower) return { outletPasses: true, candidate: lower };
+    }
+    const higher = testCandidate(baseRent, baseAdvance + delta);
+    if (higher) return { outletPasses: true, candidate: higher };
+  }
+
+  return { outletPasses: true, candidate: null };
+}
+
 function runAutoCorrect() {
   const base = captureFirstFeasibilityEntry();
   if (base.sales <= 0) {
@@ -655,26 +741,31 @@ function runAutoCorrect() {
   }
 
   let sales = roundUpToThousand(Math.max(Number(state.data.project.projectedDailySales) || 0, base.sales));
-  // This practical guard permits up to a BDT 20,000,000 increase while the
-  // actual search still checks every BDT 1,000 step and stops at the first pass.
-  const highestSalesToTest = sales + 20000000;
+  const startingSales = sales;
+  const highestSalesToTest = sales + 5000000;
+  const workingData = cloneData(state.data);
 
   while (sales <= highestSalesToTest) {
-    const ratio = sales / Math.max(base.sales, 1);
-    state.data.project.projectedDailySales = sales;
-    state.data.project.monthlyRent = roundUpToThousand(base.rent * ratio);
-    state.data.project.advance = roundUpToThousand(base.advance * ratio);
-    recalculate();
-
-    if (autoFeasibilityResult().passes) {
-      state.status = { kind: "ready", message: "Auto Correct completed using the minimum required sales level." };
+    const result = findCostAdjustmentAtSales(workingData, sales, base);
+    if (result.candidate) {
+      state.data.project.projectedDailySales = result.candidate.sales;
+      state.data.project.monthlyRent = result.candidate.rent;
+      state.data.project.advance = result.candidate.advance;
+      recalculate();
+      const salesMessage = result.candidate.sales === startingSales
+        ? `Sales kept at ৳ ${formatMoney(result.candidate.sales)}`
+        : `Sales increased to ৳ ${formatMoney(result.candidate.sales)}`;
+      state.status = {
+        kind: "ready",
+        message: `Auto Correct completed. ${salesMessage}; Rent ৳ ${formatMoney(result.candidate.rent)}; Advance ৳ ${formatMoney(result.candidate.advance)}.`,
+      };
       render();
       return;
     }
     sales += 1000;
   }
 
-  state.status = { kind: "warning", message: "The current Sales, Rent and Advance ratio cannot make every required Auto Feasibility check green. Review the three manual entry values." };
+  state.status = { kind: "warning", message: "Auto Correct could not find a practical green combination. The entered Sales, Rent and Advance values were left unchanged." };
   render();
 }
 
