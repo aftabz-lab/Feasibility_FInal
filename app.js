@@ -155,6 +155,11 @@ function headerHtml() {
           </div>
         </div>
         <div class="top-actions">
+          <div class="auto-header-control">
+            <span>Auto Feasibility</span>
+            <strong class="auto-header-status ${autoFeasibilityStatus()}">${autoFeasibilityStatus() === "green" ? "GREEN" : "RED"}</strong>
+            <button class="btn btn-primary" type="button" data-action="auto-correct">Auto Correct</button>
+          </div>
           <div class="mode-chip">${escapeHtml(mode)}</div>
           <button class="btn btn-secondary" type="button" data-action="upload-workbook">Load Excel</button>
           <button class="btn btn-primary" type="button" data-action="download-rules-xlsx">Download Excel with Rules</button>
@@ -451,7 +456,6 @@ function renderDataEntry() {
           ? "Headcount follows monthly sales using the Shwapno manpower matrix. Editing any quantity switches this table to manual."
           : "Manual mode: headcount is no longer driven by sales. Tick the box to hand control back to the matrix.",
           `<label class="inline-check"><input type="checkbox" data-action="manpower-auto"${manpowerAuto ? " checked" : ""}> Auto headcount from monthly sales${manpowerAuto ? ` &middot; ${yesFlagLabel} &middot; ${escapeHtml(manpowerBandLabel(monthlySalesForBand, state.data.project.pnp))}` : ""}</label><div class="table-scroll"><table class="input-table"><thead><tr><th>Position</th><th>Qty</th><th>Salary</th><th>Total</th></tr></thead><tbody>${staffRows}</tbody></table></div>`)}
-        ${sectionCard("Auto feasibility control", "Automatic feasibility status and correction tools.", `<div class="auto-feas-control"><span class="auto-feas-dot ${autoFeasibilityStatus()}">${autoFeasibilityStatus() === "green" ? "GREEN" : "RED"}</span><button class="btn btn-primary" type="button" data-action="auto-correct">Auto Correct</button></div>`)}
         ${sectionCard("Auto feasibility assumptions", "Editable financial drivers used by the output report.", `<details open><summary>Growth, stock and margin</summary><div class="field-grid three">
           ${textField("Stock / SFT", "advanced.stockPerSft", { type: "number", min: 0, step: 1 })}
           ${textField("GP annual step", "advanced.gpAnnualStep", { type: "number", min: 0, max: 1, step: 0.0001 })}
@@ -551,11 +555,21 @@ function feasibilityCellHtml(row, value, timeIndex, model, isTotal = false) {
 
 function autoFeasibilityStatus() {
   const rows = state.model?.rows || [];
-  const failed = rows.some((row) => {
+  const failedRows = rows.some((row) => {
     if (!row || row.type === "heading" || !row.emphasis) return false;
+    const label = String(row.label || "").toLowerCase();
+    if (label.includes("cash flow return")) return false;
     return row.values?.some((v) => Number(v) < 0) || (row.total !== null && row.total !== undefined && Number(row.total) < 0);
   });
-  return failed ? "red" : "green";
+
+  const metrics = state.model?.metrics || {};
+  const failedMetrics =
+    Number(metrics.npv) < 0 ||
+    Number(metrics.roi) < 0 ||
+    Number(metrics.irr) < 0 ||
+    Number(metrics.payback) <= 0;
+
+  return failedRows || failedMetrics ? "red" : "green";
 }
 
 function captureFirstFeasibilityEntry() {
