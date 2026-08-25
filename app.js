@@ -581,29 +581,43 @@ function captureFirstFeasibilityEntry() {
   };
 }
 
+function ceilThousand(value) {
+  return Math.ceil(Number(value || 0) / 1000) * 1000;
+}
+
 function runAutoCorrect() {
   captureFirstFeasibilityEntry();
   const base = state.firstFeasibilityEntry;
   const maxSales = base.sales + 15000;
-  const startSales = Number(state.data.project.projectedDailySales) || base.sales;
-  let sales = Math.min(Math.max(startSales, base.sales), maxSales);
+  let sales = Math.max(base.sales, Number(state.data.project.projectedDailySales) || base.sales);
 
-  const originalTotal = base.sales + base.rent + base.advance || 1;
+  // Search the lowest sales requirement first. Rent and advance follow the
+  // original feasibility-entry ratio and are always rounded upward.
+  for (let i = 0; i <= 30; i++) {
+    const candidate = Math.min(maxSales, base.sales + i * 500);
+    state.data.project.projectedDailySales = ceilThousand(candidate);
+    const ratio = state.data.project.projectedDailySales / Math.max(base.sales, 1);
+    state.data.project.monthlyRent = ceilThousand(base.rent * ratio);
+    state.data.project.advance = ceilThousand(base.advance * ratio);
+    recalculate();
+    if (autoFeasibilityStatus() === "green") {
+      state.status = { kind: "ready", message: "Auto Correct completed. Lowest required sales point achieved." };
+      render();
+      return;
+    }
+    sales = candidate;
+  }
+
+  // If sales ceiling is reached, reduce fixed burden proportionally while
+  // keeping values rounded upward until the checks pass.
+  state.data.project.projectedDailySales = ceilThousand(maxSales);
   for (let i = 0; i < 20; i++) {
-    state.data.project.projectedDailySales = Math.round(sales);
-    const ratio = sales / Math.max(base.sales, 1);
-    state.data.project.monthlyRent = Math.round(base.rent * ratio);
-    state.data.project.advance = Math.round(base.advance * ratio);
+    state.data.project.monthlyRent = ceilThousand(base.rent * (1 - (i + 1) * 0.02));
+    state.data.project.advance = ceilThousand(base.advance * (1 - (i + 1) * 0.02));
     recalculate();
     if (autoFeasibilityStatus() === "green") break;
-    if (sales < maxSales) sales = Math.min(maxSales, sales + Math.max(500, base.sales * 0.05));
-    else {
-      state.data.project.monthlyRent = Math.max(0, Math.round(Number(state.data.project.monthlyRent) * 0.95));
-      state.data.project.advance = Math.max(0, Math.round(Number(state.data.project.advance) * 0.95));
-      recalculate();
-    }
   }
-  state.status = { kind: "ready", message: "Auto Correct completed using first feasibility entry ratio." };
+  state.status = { kind: "ready", message: "Auto Correct completed using optimized sales, rent and advance." };
   render();
 }
 
