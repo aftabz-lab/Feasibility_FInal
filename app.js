@@ -28,6 +28,7 @@ const state = {
   signatureAssets: [],
   rulesWorkbook: { buffer: null, sourceName: "source-workbook.xlsx" },
   status: { kind: "loading", message: "Loading the workbook baseline…" },
+  firstFeasibilityEntry: null,
 };
 
 const blankInitialSelectionPaths = Object.freeze([
@@ -450,6 +451,7 @@ function renderDataEntry() {
           ? "Headcount follows monthly sales using the Shwapno manpower matrix. Editing any quantity switches this table to manual."
           : "Manual mode: headcount is no longer driven by sales. Tick the box to hand control back to the matrix.",
           `<label class="inline-check"><input type="checkbox" data-action="manpower-auto"${manpowerAuto ? " checked" : ""}> Auto headcount from monthly sales${manpowerAuto ? ` &middot; ${yesFlagLabel} &middot; ${escapeHtml(manpowerBandLabel(monthlySalesForBand, state.data.project.pnp))}` : ""}</label><div class="table-scroll"><table class="input-table"><thead><tr><th>Position</th><th>Qty</th><th>Salary</th><th>Total</th></tr></thead><tbody>${staffRows}</tbody></table></div>`)}
+        ${sectionCard("Auto feasibility control", "Automatic feasibility status and correction tools.", `<div class="auto-feas-control"><span class="auto-feas-dot ${autoFeasibilityStatus()}">${autoFeasibilityStatus() === "green" ? "GREEN" : "RED"}</span><button class="btn btn-primary" type="button" data-action="auto-correct">Auto Correct</button></div>`)}
         ${sectionCard("Auto feasibility assumptions", "Editable financial drivers used by the output report.", `<details open><summary>Growth, stock and margin</summary><div class="field-grid three">
           ${textField("Stock / SFT", "advanced.stockPerSft", { type: "number", min: 0, step: 1 })}
           ${textField("GP annual step", "advanced.gpAnnualStep", { type: "number", min: 0, max: 1, step: 0.0001 })}
@@ -546,6 +548,51 @@ function feasibilityCellHtml(row, value, timeIndex, model, isTotal = false) {
   return `<td class="${classes.join(" ")}"${title ? ` title="${escapeHtml(title)}"` : ""}>${feasibilityValueText(row, value)}</td>`;
 }
 
+
+function autoFeasibilityStatus() {
+  const rows = state.model?.rows || [];
+  const failed = rows.some((row) => {
+    if (!row || row.type === "heading" || !row.emphasis) return false;
+    return row.values?.some((v) => Number(v) < 0) || (row.total !== null && row.total !== undefined && Number(row.total) < 0);
+  });
+  return failed ? "red" : "green";
+}
+
+function captureFirstFeasibilityEntry() {
+  if (state.firstFeasibilityEntry) return;
+  state.firstFeasibilityEntry = {
+    sales: Number(state.data.project.projectedDailySales) || 0,
+    rent: Number(state.data.project.monthlyRent) || 0,
+    advance: Number(state.data.project.advance) || 0
+  };
+}
+
+function runAutoCorrect() {
+  captureFirstFeasibilityEntry();
+  const base = state.firstFeasibilityEntry;
+  const maxSales = base.sales + 15000;
+  const startSales = Number(state.data.project.projectedDailySales) || base.sales;
+  let sales = Math.min(Math.max(startSales, base.sales), maxSales);
+
+  const originalTotal = base.sales + base.rent + base.advance || 1;
+  for (let i = 0; i < 20; i++) {
+    state.data.project.projectedDailySales = Math.round(sales);
+    const ratio = sales / Math.max(base.sales, 1);
+    state.data.project.monthlyRent = Math.round(base.rent * ratio);
+    state.data.project.advance = Math.round(base.advance * ratio);
+    recalculate();
+    if (autoFeasibilityStatus() === "green") break;
+    if (sales < maxSales) sales = Math.min(maxSales, sales + Math.max(500, base.sales * 0.05));
+    else {
+      state.data.project.monthlyRent = Math.max(0, Math.round(Number(state.data.project.monthlyRent) * 0.95));
+      state.data.project.advance = Math.max(0, Math.round(Number(state.data.project.advance) * 0.95));
+      recalculate();
+    }
+  }
+  state.status = { kind: "ready", message: "Auto Correct completed using first feasibility entry ratio." };
+  render();
+}
+
 function renderFeasibility() {
   const { model, data } = state;
   const reportRows = model.rows.map((row) => {
@@ -635,6 +682,7 @@ function applyChange(target) {
     return;
   }
   setPath(state.data, path, selectedValue);
+  if (["project.projectedDailySales","project.monthlyRent","project.advance"].includes(path)) captureFirstFeasibilityEntry();
   if (/^staff\.\d+\.quantity$/.test(path)) {
     // A hand-typed headcount wins over the matrix from here on.
     state.data.information.manpowerAuto = false;
@@ -863,6 +911,10 @@ app.addEventListener("click", (event) => {
   if (actionName === "download-rules-xlsx") downloadRulesExport();
   if (actionName === "download-pdf") downloadPdfExport();
   if (actionName === "share-pdf") sharePdfExport();
+  if (actionName === "auto-correct") {
+    runAutoCorrect();
+    return;
+  }
   if (actionName === "manpower-auto") {
     const enabled = state.data.information.manpowerAuto === false;
     state.data.information.manpowerAuto = enabled;

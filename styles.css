@@ -187,3 +187,8 @@ details { margin-top: 7px; border: 1px solid #315069; border-radius: 9px; backgr
 
 .status-link { margin-left: 10px; padding: 2px 10px; border: 1px solid #31546f; border-radius: 999px; color: var(--accent); font-weight: 650; text-decoration: none; font-size: 0.72rem; }
 .status-link:hover { background: rgba(49, 84, 111, 0.35); }
+
+.auto-feas-control{display:flex;align-items:center;gap:10px;margin:8px 0}
+.auto-feas-dot{display:inline-flex;align-items:center;justify-content:center;min-width:56px;height:28px;border-radius:14px;font-size:11px;font-weight:700;color:white;padding:0 12px}
+.auto-feas-dot.green{background:#1f9d55}
+.auto-feas-dot.red{background:#d93025}
