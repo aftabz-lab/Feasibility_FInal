@@ -155,11 +155,6 @@ function headerHtml() {
           </div>
         </div>
         <div class="top-actions">
-          <div class="auto-header-control">
-            <span>Auto Feasibility</span>
-            <strong class="auto-header-status ${autoFeasibilityStatus()}">${autoFeasibilityStatus() === "green" ? "GREEN" : "RED"}</strong>
-            <button class="btn btn-primary" type="button" data-action="auto-correct">Auto Correct</button>
-          </div>
           <div class="mode-chip">${escapeHtml(mode)}</div>
           <button class="btn btn-secondary" type="button" data-action="upload-workbook">Load Excel</button>
           <button class="btn btn-primary" type="button" data-action="download-rules-xlsx">Download Excel with Rules</button>
@@ -456,6 +451,7 @@ function renderDataEntry() {
           ? "Headcount follows monthly sales using the Shwapno manpower matrix. Editing any quantity switches this table to manual."
           : "Manual mode: headcount is no longer driven by sales. Tick the box to hand control back to the matrix.",
           `<label class="inline-check"><input type="checkbox" data-action="manpower-auto"${manpowerAuto ? " checked" : ""}> Auto headcount from monthly sales${manpowerAuto ? ` &middot; ${yesFlagLabel} &middot; ${escapeHtml(manpowerBandLabel(monthlySalesForBand, state.data.project.pnp))}` : ""}</label><div class="table-scroll"><table class="input-table"><thead><tr><th>Position</th><th>Qty</th><th>Salary</th><th>Total</th></tr></thead><tbody>${staffRows}</tbody></table></div>`)}
+        ${sectionCard("Auto feasibility control", "Automatic feasibility status and correction tools.", `<div class="auto-feas-control"><span class="auto-feas-dot ${autoFeasibilityStatus()}">${autoFeasibilityStatus() === "green" ? "GREEN" : "RED"}</span><button class="btn btn-primary" type="button" data-action="auto-correct">Auto Correct</button></div>`)}
         ${sectionCard("Auto feasibility assumptions", "Editable financial drivers used by the output report.", `<details open><summary>Growth, stock and margin</summary><div class="field-grid three">
           ${textField("Stock / SFT", "advanced.stockPerSft", { type: "number", min: 0, step: 1 })}
           ${textField("GP annual step", "advanced.gpAnnualStep", { type: "number", min: 0, max: 1, step: 0.0001 })}
@@ -555,21 +551,11 @@ function feasibilityCellHtml(row, value, timeIndex, model, isTotal = false) {
 
 function autoFeasibilityStatus() {
   const rows = state.model?.rows || [];
-  const failedRows = rows.some((row) => {
+  const failed = rows.some((row) => {
     if (!row || row.type === "heading" || !row.emphasis) return false;
-    const label = String(row.label || "").toLowerCase();
-    if (label.includes("cash flow return")) return false;
     return row.values?.some((v) => Number(v) < 0) || (row.total !== null && row.total !== undefined && Number(row.total) < 0);
   });
-
-  const metrics = state.model?.metrics || {};
-  const failedMetrics =
-    Number(metrics.npv) < 0 ||
-    Number(metrics.roi) < 0 ||
-    Number(metrics.irr) < 0 ||
-    Number(metrics.payback) <= 0;
-
-  return failedRows || failedMetrics ? "red" : "green";
+  return failed ? "red" : "green";
 }
 
 function captureFirstFeasibilityEntry() {
@@ -581,7 +567,7 @@ function captureFirstFeasibilityEntry() {
   };
 }
 
-function ceilThousand(value) {
+function ceil1000(value) {
   return Math.ceil(Number(value || 0) / 1000) * 1000;
 }
 
@@ -589,35 +575,47 @@ function runAutoCorrect() {
   captureFirstFeasibilityEntry();
   const base = state.firstFeasibilityEntry;
   const maxSales = base.sales + 15000;
-  let sales = Math.max(base.sales, Number(state.data.project.projectedDailySales) || base.sales);
+  const startingSales = Math.min(Math.max(Number(state.data.project.projectedDailySales) || base.sales, base.sales), maxSales);
 
-  // Search the lowest sales requirement first. Rent and advance follow the
-  // original feasibility-entry ratio and are always rounded upward.
-  for (let i = 0; i <= 30; i++) {
-    const candidate = Math.min(maxSales, base.sales + i * 500);
-    state.data.project.projectedDailySales = ceilThousand(candidate);
-    const ratio = state.data.project.projectedDailySales / Math.max(base.sales, 1);
-    state.data.project.monthlyRent = ceilThousand(base.rent * ratio);
-    state.data.project.advance = ceilThousand(base.advance * ratio);
+  let solved = false;
+  let selectedSales = startingSales;
+
+  // Search the lowest sales value that turns the feasibility calculation positive.
+  for (let sales = ceil1000(startingSales); sales <= ceil1000(maxSales); sales += 1000) {
+    const ratio = sales / Math.max(base.sales, 1);
+    state.data.project.projectedDailySales = ceil1000(sales);
+    state.data.project.monthlyRent = ceil1000(base.rent * ratio);
+    state.data.project.advance = ceil1000(base.advance * ratio);
     recalculate();
+
     if (autoFeasibilityStatus() === "green") {
-      state.status = { kind: "ready", message: "Auto Correct completed. Lowest required sales point achieved." };
-      render();
-      return;
+      selectedSales = sales;
+      solved = true;
+      break;
     }
-    sales = candidate;
   }
 
-  // If sales ceiling is reached, reduce fixed burden proportionally while
-  // keeping values rounded upward until the checks pass.
-  state.data.project.projectedDailySales = ceilThousand(maxSales);
-  for (let i = 0; i < 20; i++) {
-    state.data.project.monthlyRent = ceilThousand(base.rent * (1 - (i + 1) * 0.02));
-    state.data.project.advance = ceilThousand(base.advance * (1 - (i + 1) * 0.02));
+  // If sales limit is reached, keep the best allowed values and normalize rounding.
+  if (!solved) {
+    const ratio = maxSales / Math.max(base.sales, 1);
+    state.data.project.projectedDailySales = ceil1000(maxSales);
+    state.data.project.monthlyRent = ceil1000(base.rent * ratio);
+    state.data.project.advance = ceil1000(base.advance * ratio);
     recalculate();
-    if (autoFeasibilityStatus() === "green") break;
   }
-  state.status = { kind: "ready", message: "Auto Correct completed using optimized sales, rent and advance." };
+
+  // Final rounding guarantee.
+  state.data.project.projectedDailySales = ceil1000(state.data.project.projectedDailySales);
+  state.data.project.monthlyRent = ceil1000(state.data.project.monthlyRent);
+  state.data.project.advance = ceil1000(state.data.project.advance);
+  recalculate();
+
+  state.status = {
+    kind: "ready",
+    message: solved
+      ? `Auto Correct completed at minimum required sales: ${formatMoney(selectedSales)}.`
+      : "Auto Correct reached the maximum allowed sales adjustment.",
+  };
   render();
 }
 
