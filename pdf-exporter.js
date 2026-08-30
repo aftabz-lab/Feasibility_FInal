@@ -26,6 +26,31 @@ const COLORS = {
 // signatory's "Include this signature in PDF" checkbox is enabled.
 const PAGE_REVIEW_SIGNATURE_ID = "saiful-alam-rasel-signature";
 
+// Largest readable type that still fits the existing fixed three-page report.
+// Long values are reduced only as far as the former production size, so the
+// larger type never creates extra truncation or changes the established layout.
+const PDF_TYPE = Object.freeze({
+  pageTitle: 17.5,
+  pageSubtitle: 8.4,
+  pageMeta: 7.2,
+  forecastTable: 7.4,
+  categoryTable: 7.5,
+  projectTable: 7.5,
+  projectTitle: 8.4,
+  informationTable: 8.5,
+  informationTitle: 8.8,
+  staffTable: 8.4,
+  feasibilityHeader: 9.2,
+  feasibilityLabel: 9,
+  feasibilityValue: 8.9,
+  returnTable: 8.8,
+  metricTable: 8.8,
+  metricTitle: 9.2,
+  signatureRole: 7.7,
+  signatureName: 8.2,
+  signatureDesignation: 7,
+});
+
 function isPdfSignatureEnabled(model, signatureId) {
   return model.signatories.some((person) => person.signatureId === signatureId && person.includeInPdf === true);
 }
@@ -72,13 +97,21 @@ function ellipsis(doc, value, width, size) {
 }
 
 function drawText(doc, value, x, y, width, options = {}) {
-  const size = options.size ?? 7;
+  const preferredSize = options.size ?? 7;
+  const minimumSize = Math.min(preferredSize, options.minSize ?? preferredSize);
   const align = options.align ?? "left";
   const padding = options.padding ?? 3;
   doc.setFont("helvetica", options.bold ? "bold" : "normal");
-  doc.setFontSize(size);
+  doc.setFontSize(preferredSize);
   textColor(doc, options.color ?? COLORS.ink);
-  const rendered = ellipsis(doc, value, Math.max(5, width - (padding * 2)), size);
+  const availableWidth = Math.max(5, width - (padding * 2));
+  const source = String(value ?? "");
+  const preferredWidth = doc.getTextWidth(source);
+  const proportionalSize = preferredWidth > availableWidth && preferredWidth > 0
+    ? preferredSize * (availableWidth / preferredWidth)
+    : preferredSize;
+  const fittedSize = Math.max(minimumSize, Math.floor(Math.min(preferredSize, proportionalSize) * 20) / 20);
+  const rendered = ellipsis(doc, source, availableWidth, fittedSize);
   const textX = align === "right" ? x + width - padding : align === "center" ? x + width / 2 : x + padding;
   doc.text(rendered, textX, y, { align });
 }
@@ -106,20 +139,20 @@ function drawPageHeader(doc, title, subtitle, location, pageLabel, exportedAt) {
   doc.setLineWidth(1.1);
   doc.line(0, 42, width, 42);
   doc.setFont("helvetica", "bold");
-  doc.setFontSize(15);
+  doc.setFontSize(PDF_TYPE.pageTitle);
   textColor(doc, COLORS.navy);
   doc.text(title, margin, 20);
   doc.setFont("helvetica", "normal");
-  doc.setFontSize(7.3);
+  doc.setFontSize(PDF_TYPE.pageSubtitle);
   textColor(doc, COLORS.muted);
-  doc.setFontSize(6.4);
+  doc.setFontSize(PDF_TYPE.pageMeta);
   const generatedLabelWidth = doc.getTextWidth(generatedLabel);
-  doc.setFontSize(7.3);
-  doc.text(ellipsis(doc, subtitle, Math.max(80, width - (margin * 2) - generatedLabelWidth - 12), 7.3), margin, 32);
-  doc.setFontSize(6.4);
+  doc.setFontSize(PDF_TYPE.pageSubtitle);
+  doc.text(ellipsis(doc, subtitle, Math.max(80, width - (margin * 2) - generatedLabelWidth - 12), PDF_TYPE.pageSubtitle), margin, 32);
+  doc.setFontSize(PDF_TYPE.pageMeta);
   doc.text(generatedLabel, width - margin, 32, { align: "right" });
-  doc.setFontSize(6.4);
-  doc.text(ellipsis(doc, location, width - 160, 6.4), margin, 52);
+  doc.setFontSize(PDF_TYPE.pageMeta);
+  doc.text(ellipsis(doc, location, width - 160, PDF_TYPE.pageMeta), margin, 52);
   doc.text(pageLabel, width - margin, 52, { align: "right" });
   return 62;
 }
@@ -127,6 +160,7 @@ function drawPageHeader(doc, title, subtitle, location, pageLabel, exportedAt) {
 function drawTable(doc, config) {
   const {
     x, y, widths, headers, rows, rowHeight = 12, headerHeight = 14, fontSize = 6.9,
+    minFontSize = fontSize,
     getCell = (row, column) => row[column], getFill = () => null,
     getTextColor = () => COLORS.ink, getBold = () => false, getAlign = () => "left",
   } = config;
@@ -134,7 +168,7 @@ function drawTable(doc, config) {
   let cursorX = x;
   headers.forEach((header, index) => {
     drawRect(doc, cursorX, cursorY, widths[index], headerHeight, { fill: COLORS.white, borderColor: COLORS.line });
-    drawText(doc, header, cursorX, cursorY + headerHeight - 4.2, widths[index], { size: fontSize, color: COLORS.navy, bold: true, align: "center" });
+    drawText(doc, header, cursorX, cursorY + headerHeight - 4.2, widths[index], { size: fontSize, minSize: minFontSize, color: COLORS.navy, bold: true, align: "center" });
     cursorX += widths[index];
   });
   cursorY += headerHeight;
@@ -146,6 +180,7 @@ function drawTable(doc, config) {
       drawRect(doc, cursorX, cursorY, width, rowHeight, { fill: cellFill || (rowIndex % 2 ? COLORS.pale : COLORS.white) });
       drawText(doc, cell, cursorX, cursorY + rowHeight - 3.55, width, {
         size: fontSize,
+        minSize: minFontSize,
         color: getTextColor(row, columnIndex, cell, rowIndex),
         bold: getBold(row, columnIndex, cell, rowIndex),
         align: getAlign(row, columnIndex, cell, rowIndex),
@@ -160,19 +195,23 @@ function drawTable(doc, config) {
 function drawLabelValueTable(doc, x, y, width, rows, options = {}) {
   const labelWidth = options.labelWidth ?? Math.round(width * 0.55);
   const rowHeight = options.rowHeight ?? 12;
+  const fontSize = options.fontSize ?? 6.7;
+  const minFontSize = options.minFontSize ?? fontSize;
+  const titleFontSize = options.titleFontSize ?? 7;
+  const titleMinFontSize = options.titleMinFontSize ?? titleFontSize;
   const title = options.title;
   let cursorY = y;
   if (title) {
     drawRect(doc, x, cursorY, width, 15, { fill: COLORS.white, borderColor: COLORS.line });
-    drawText(doc, title, x, cursorY + 10.5, width, { size: 7, color: COLORS.navy, bold: true, align: "center" });
+    drawText(doc, title, x, cursorY + 10.5, width, { size: titleFontSize, minSize: titleMinFontSize, color: COLORS.navy, bold: true, align: "center" });
     cursorY += 15;
   }
   rows.forEach(([label, value, kind], index) => {
     const bodyFill = kind === "input" ? COLORS.yellow : index % 2 ? COLORS.pale : COLORS.white;
     drawRect(doc, x, cursorY, labelWidth, rowHeight, { fill: bodyFill });
     drawRect(doc, x + labelWidth, cursorY, width - labelWidth, rowHeight, { fill: bodyFill });
-    drawText(doc, label, x, cursorY + rowHeight - 3.6, labelWidth, { size: 6.7, bold: kind === "key" });
-    drawText(doc, value, x + labelWidth, cursorY + rowHeight - 3.6, width - labelWidth, { size: 6.7, align: "right", bold: kind === "key" });
+    drawText(doc, label, x, cursorY + rowHeight - 3.6, labelWidth, { size: fontSize, minSize: minFontSize, bold: kind === "key" });
+    drawText(doc, value, x + labelWidth, cursorY + rowHeight - 3.6, width - labelWidth, { size: fontSize, minSize: minFontSize, align: "right", bold: kind === "key" });
     cursorY += rowHeight;
   });
   return cursorY;
@@ -255,7 +294,8 @@ async function drawForecastPage(doc, data, model, assets, exportedAt) {
     headers: ["SL", "Description", "Weightage", "Target", "Measuring Tools", "Answers", "Mark", "Achievement"],
     rows: scoreRows,
     rowHeight: 11.3,
-    fontSize: 5.35,
+    fontSize: PDF_TYPE.forecastTable,
+    minFontSize: 5.35,
     getFill: (row, column, cell, index) => index === scoreRows.length - 1 ? COLORS.green : (column === 5 ? COLORS.yellow : null),
     getBold: (row, column, cell, index) => index === scoreRows.length - 1,
     // Headers are always centred. The description remains left-aligned, and
@@ -278,7 +318,15 @@ async function drawForecastPage(doc, data, model, assets, exportedAt) {
     ["Projected Daily Footfall for this New Location", formatMoney(model.inputs.dailyFootfall, 1), "input"],
     ["Existing No. of Outlets Around 1 KM Radius", formatMoney(data.project.existingOutlets, 0)],
   ];
-  const projectEnd = drawLabelValueTable(doc, margin, scoreEnd + 13, leftWidth, projectRows, { title: "PROJECT & REFERENCE INFORMATION", labelWidth: 290, rowHeight: 11.2 });
+  const projectEnd = drawLabelValueTable(doc, margin, scoreEnd + 13, leftWidth, projectRows, {
+    title: "PROJECT & REFERENCE INFORMATION",
+    labelWidth: 290,
+    rowHeight: 11.2,
+    fontSize: PDF_TYPE.projectTable,
+    minFontSize: 6.7,
+    titleFontSize: PDF_TYPE.projectTitle,
+    titleMinFontSize: 7,
+  });
 
   const categoryRows = model.categories.map((category) => [
     category.name,
@@ -294,7 +342,8 @@ async function drawForecastPage(doc, data, model, assets, exportedAt) {
     headers: ["Category", "Mix", "Per Day", "Monthly"],
     rows: categoryRows,
     rowHeight: 11.3,
-    fontSize: 5.5,
+    fontSize: PDF_TYPE.categoryTable,
+    minFontSize: 5.5,
     getFill: (row, column, cell, index) => index === categoryRows.length - 1 ? COLORS.green : null,
     getBold: (row, column, cell, index) => index === categoryRows.length - 1,
     getAlign: (row, column) => column === 0 ? "left" : "right",
@@ -328,7 +377,15 @@ async function drawInformationPage(doc, data, model, assets, exportedAt) {
     ["Area Out of Dhaka", `${model.dhakaClassification} (${model.inputs.areaOutsideDhaka})`, "input"],
     ["Decoration Cost", formatMoney(data.information.decorationCost), "input"],
   ];
-  const informationEnd = drawLabelValueTable(doc, margin, y, leftWidth, informationRows, { title: "PROJECT PARAMETERS", labelWidth: 188, rowHeight: 14 });
+  const informationEnd = drawLabelValueTable(doc, margin, y, leftWidth, informationRows, {
+    title: "PROJECT PARAMETERS",
+    labelWidth: 188,
+    rowHeight: 14,
+    fontSize: PDF_TYPE.informationTable,
+    minFontSize: 6.7,
+    titleFontSize: PDF_TYPE.informationTitle,
+    titleMinFontSize: 7,
+  });
   const staffRows = data.staff.map((staff) => [
     staff.name,
     formatMoney(staff.quantity, 0),
@@ -348,7 +405,8 @@ async function drawInformationPage(doc, data, model, assets, exportedAt) {
     headers: ["Manpower Allocation", "Qty", "Salary", "Total Amount"],
     rows: staffRows,
     rowHeight: 14,
-    fontSize: 6.7,
+    fontSize: PDF_TYPE.staffTable,
+    minFontSize: 6.7,
     getFill: (row, column, cell, index) => index === staffRows.length - 1 ? COLORS.green : (column === 1 ? COLORS.yellow : null),
     getBold: (row, column, cell, index) => index === staffRows.length - 1,
     getAlign: (row, column) => column === 0 ? "left" : "right",
@@ -390,18 +448,19 @@ function drawFeasibilityTable(doc, y, data, model) {
   const x = margin;
   const widths = [260, 50, 46, 46, 46, 8, 50, 50, 50, 50, 50, 78];
   const headers = ["Particulars", "Rate", "M1", "M2", "M3", "", "YR-1", "YR-2", "YR-3", "YR-4", "YR-5", "5Y Total"];
+  const headerHeight = 14.5;
   let cursorX = x;
   headers.forEach((header, index) => {
-    drawRect(doc, cursorX, y, widths[index], 13, { fill: COLORS.white, borderColor: COLORS.line });
-    drawText(doc, header, cursorX, y + 8.8, widths[index], { size: 6.2, color: COLORS.navy, bold: true, align: index === 0 ? "left" : "center" });
+    drawRect(doc, cursorX, y, widths[index], headerHeight, { fill: COLORS.white, borderColor: COLORS.line });
+    drawText(doc, header, cursorX, y + 10.2, widths[index], { size: PDF_TYPE.feasibilityHeader, minSize: 6.2, color: COLORS.navy, bold: true, align: index === 0 ? "left" : "center", padding: 2.2 });
     cursorX += widths[index];
   });
-  let cursorY = y + 13;
-  const rowHeight = 10.3;
+  let cursorY = y + headerHeight;
+  const rowHeight = 11.7;
   model.rows.forEach((row, rowIndex) => {
     if (row.type === "heading") {
       drawRect(doc, x, cursorY, widths.reduce((total, width) => total + width, 0), rowHeight, { fill: COLORS.white, borderColor: COLORS.line });
-      drawText(doc, row.label, x, cursorY + 7.2, widths.reduce((total, width) => total + width, 0), { size: 6.4, color: COLORS.navy, bold: true });
+      drawText(doc, row.label, x, cursorY + 8.25, widths.reduce((total, width) => total + width, 0), { size: PDF_TYPE.feasibilityHeader, minSize: 6.4, color: COLORS.navy, bold: true });
       cursorY += rowHeight;
       return;
     }
@@ -412,8 +471,9 @@ function drawFeasibilityTable(doc, y, data, model) {
       const sourceValue = timeIndex === null ? (columnIndex === 11 ? row.total : null) : row.values[timeIndex];
       const cellFill = columnIndex === 5 ? COLORS.pale : valueTone(model, row, sourceValue, timeIndex);
       drawRect(doc, cursorX, cursorY, widths[columnIndex], rowHeight, { fill: cellFill || (rowIndex % 2 ? COLORS.pale : COLORS.white) });
-      drawText(doc, value, cursorX, cursorY + 7.15, widths[columnIndex], {
-        size: columnIndex === 0 ? 6.2 : 6.1,
+      drawText(doc, value, cursorX, cursorY + 8.2, widths[columnIndex], {
+        size: columnIndex === 0 ? PDF_TYPE.feasibilityLabel : PDF_TYPE.feasibilityValue,
+        minSize: columnIndex === 0 ? 6.2 : 6.1,
         bold: row.emphasis,
         color: columnIndex >= 2 && columnIndex !== 5 ? valueTextTone(model, row, sourceValue, timeIndex) : COLORS.ink,
         align: columnIndex === 0 ? "left" : "right",
@@ -440,9 +500,10 @@ function drawReturnSection(doc, x, y, width, data, model) {
     widths: headerWidths,
     headers: ["Cash Flow / Return", "YR-1", "YR-2", "YR-3", "YR-4", "YR-5"],
     rows: returnRows,
-    rowHeight: 11.5,
-    headerHeight: 13,
-    fontSize: 6.2,
+    rowHeight: 12.5,
+    headerHeight: 14,
+    fontSize: PDF_TYPE.returnTable,
+    minFontSize: 6.2,
     getFill: (row, column, cell, index) => index === 2 && column > 0 ? (String(cell).includes("-") ? COLORS.red : COLORS.green) : null,
     getAlign: (row, column) => column === 0 ? "left" : "right",
   });
@@ -457,7 +518,11 @@ function drawReturnSection(doc, x, y, width, data, model) {
   return drawLabelValueTable(doc, x, cursorY, 252, metricRows, {
     title: "RETURN METRICS",
     labelWidth: 138,
-    rowHeight: 11.5,
+    rowHeight: 12.5,
+    fontSize: PDF_TYPE.metricTable,
+    minFontSize: 6.7,
+    titleFontSize: PDF_TYPE.metricTitle,
+    titleMinFontSize: 7,
   });
 }
 
@@ -538,9 +603,9 @@ async function drawSignatureBlocks(doc, y, model, assets, options = {}) {
       doc.setLineDashPattern([1.6, 1.8], 0);
       doc.line(lineX, lineY, lineX + lineWidth, lineY);
       doc.setLineDashPattern([], 0);
-      drawText(doc, person.role || "", x, top + 51, blockWidth, { size: 6.5, align: "center", color: COLORS.muted });
-      drawText(doc, person.name || "", x, top + 61, blockWidth, { size: 6.8, align: "center", bold: true });
-      drawText(doc, person.designation || "", x, top + 70, blockWidth, { size: 5.9, align: "center", color: COLORS.muted });
+      drawText(doc, person.role || "", x, top + 51, blockWidth, { size: PDF_TYPE.signatureRole, minSize: 6.5, align: "center", color: COLORS.muted });
+      drawText(doc, person.name || "", x, top + 61, blockWidth, { size: PDF_TYPE.signatureName, minSize: 6.8, align: "center", bold: true });
+      drawText(doc, person.designation || "", x, top + 70, blockWidth, { size: PDF_TYPE.signatureDesignation, minSize: 5.9, align: "center", color: COLORS.muted });
     }
     renderedRows += 1;
   }
@@ -559,12 +624,12 @@ async function drawFeasibilityPage(doc, data, model, assets, exportedAt) {
   y = table.y + 10;
   if (model.alerts?.franchisePbtAboveOutletPlYear1) {
     drawRect(doc, table.x, y, table.width, 16, { fill: COLORS.red });
-    drawText(doc, "REVIEW: Year-1 Franchisee PBT is greater than Year-1 P/L considering Outbound Transport. Both values are highlighted in red.", table.x, y + 11, table.width, { size: 6.4, color: COLORS.redText, bold: true, align: "center" });
+    drawText(doc, "REVIEW: Year-1 Franchisee PBT is greater than Year-1 P/L considering Outbound Transport. Both values are highlighted in red.", table.x, y + 11, table.width, { size: 7.4, minSize: 6.4, color: COLORS.redText, bold: true, align: "center" });
     y += 22;
   }
   y = drawReturnSection(doc, table.x, y, table.width, data, model) + 17;
   drawRect(doc, signatureX, y, signatureWidth, 14, { fill: COLORS.white, borderColor: COLORS.line });
-  drawText(doc, "APPROVAL & SIGNATURES", signatureX, y + 9.5, signatureWidth, { size: 6.9, color: COLORS.navy, bold: true, align: "center" });
+  drawText(doc, "APPROVAL & SIGNATURES", signatureX, y + 9.5, signatureWidth, { size: 8.5, minSize: 6.9, color: COLORS.navy, bold: true, align: "center" });
   await drawSignatureBlocks(doc, y + 12, model, assets, { x: signatureX, width: signatureWidth });
 }
 
