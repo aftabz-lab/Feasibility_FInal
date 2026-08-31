@@ -2189,6 +2189,11 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
   const feasibilityPatch = buildDashboardFeasibilityPatch(data, model);
   patchWorksheetValues(zip, paths.get("AUTO GENERATED FEASIBILITY"), feasibilityPatch.values);
   patchWorksheetFormulas(zip, paths.get("AUTO GENERATED FEASIBILITY"), feasibilityPatch.formulas);
+  refreshWorksheetFormulaCaches(
+    zip,
+    paths.get("AUTO GENERATED FEASIBILITY"),
+    { A1: data?.project?.locationArea ?? "" },
+  );
   removeOrphanSharedFormulaReferences(zip, paths.get("AUTO GENERATED FEASIBILITY"));
   hideWorksheetRows(zip, paths.get("AUTO GENERATED FEASIBILITY"), [66, 67]);
 
