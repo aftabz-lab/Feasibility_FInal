@@ -608,15 +608,32 @@ function conditionalRowIsRed(row) {
     || (row.total !== null && row.total !== undefined && Number(row.total) < 0);
 }
 
+// The "Return metrics / Decision support" panel must be fully green before the
+// Auto feasibility control is allowed to read GREEN. These checks mirror exactly
+// the same conditions that paint those five values red on screen, so the badge
+// can never disagree with the panel (for example a negative NPV under a green
+// badge). Discount Rate is a fixed assumption and is never conditional.
+function returnMetricsAllGreen(model = state.model) {
+  const metrics = model?.metrics;
+  if (!metrics) return false;
+  const npvGreen = Number(metrics.npv) >= 0;
+  const npvReturnGreen = Number(metrics.roi) >= 0;
+  const irrGreen = metrics.irr !== null && metrics.irr !== undefined && Number(metrics.irr) >= 0;
+  const paybackGreen = metrics.payback !== null && metrics.payback !== undefined;
+  return npvGreen && npvReturnGreen && irrGreen && paybackGreen;
+}
+
 function autoFeasibilityResult(model = state.model) {
   const rows = model?.rows || [];
   const failedRows = rows.filter(conditionalRowIsRed);
   const comparisonWarning = Boolean(model?.alerts?.franchisePbtAboveOutletPlYear1);
+  const returnMetricsGreen = returnMetricsAllGreen(model);
   return {
-    passes: failedRows.length === 0 && !comparisonWarning,
-    failed: failedRows.length > 0,
+    passes: failedRows.length === 0 && !comparisonWarning && returnMetricsGreen,
+    failed: failedRows.length > 0 || !returnMetricsGreen,
     failedRows,
     comparisonWarning,
+    returnMetricsGreen,
   };
 }
 
@@ -657,6 +674,15 @@ function roundUpToThousand(value) {
   return Math.ceil(Math.max(0, Number(value) || 0) / 1000) * 1000;
 }
 
+// Auto Correct now has to satisfy the Return metrics as well, so a genuinely
+// impossible location can keep the search running for a long time. This budget
+// only stops an endless search; it never changes which combinations are accepted.
+let autoCorrectDeadline = 0;
+
+function autoCorrectSearchExpired() {
+  return autoCorrectDeadline > 0 && Date.now() > autoCorrectDeadline;
+}
+
 function evaluateAutoCorrectCandidate(workingData, sales, rent, advance) {
   workingData.project.projectedDailySales = sales;
   workingData.project.monthlyRent = rent;
@@ -671,6 +697,7 @@ function findCostAdjustmentAtSales(workingData, sales, base) {
   const tested = new Set();
 
   const testCandidate = (rent, advance) => {
+    if (autoCorrectSearchExpired()) return null;
     const roundedRent = roundUpToThousand(rent);
     const roundedAdvance = roundUpToThousand(advance);
     const key = `${roundedRent}:${roundedAdvance}`;
@@ -697,6 +724,7 @@ function findCostAdjustmentAtSales(workingData, sales, base) {
   const maximumUpwardScale = 10;
   const maximumScaleStep = (maximumUpwardScale - 1) * scaleStepsPerOne;
   for (let step = 1; step <= maximumScaleStep; step += 1) {
+    if (autoCorrectSearchExpired()) return { outletPasses: true, candidate: null };
     const downwardScale = 1 - step / scaleStepsPerOne;
     if (downwardScale >= 0) {
       const candidate = testCandidate(base.rent * downwardScale, base.advance * downwardScale);
@@ -711,6 +739,7 @@ function findCostAdjustmentAtSales(workingData, sales, base) {
   // Search nearest BDT 1,000 values in both directions without changing Sales.
   const maximumRentDelta = Math.max(500000, baseRent * 4);
   for (let delta = 1000; delta <= maximumRentDelta; delta += 1000) {
+    if (autoCorrectSearchExpired()) return { outletPasses: true, candidate: null };
     if (baseRent - delta >= 0) {
       const lower = testCandidate(baseRent - delta, baseAdvance);
       if (lower) return { outletPasses: true, candidate: lower };
@@ -721,6 +750,7 @@ function findCostAdjustmentAtSales(workingData, sales, base) {
 
   const maximumAdvanceDelta = Math.max(5000000, baseAdvance * 4);
   for (let delta = 1000; delta <= maximumAdvanceDelta; delta += 1000) {
+    if (autoCorrectSearchExpired()) return { outletPasses: true, candidate: null };
     if (baseAdvance - delta >= 0) {
       const lower = testCandidate(baseRent, baseAdvance - delta);
       if (lower) return { outletPasses: true, candidate: lower };
@@ -744,8 +774,9 @@ function runAutoCorrect() {
   const startingSales = sales;
   const highestSalesToTest = sales + 5000000;
   const workingData = cloneData(state.data);
+  autoCorrectDeadline = Date.now() + 12000;
 
-  while (sales <= highestSalesToTest) {
+  while (sales <= highestSalesToTest && !autoCorrectSearchExpired()) {
     const result = findCostAdjustmentAtSales(workingData, sales, base);
     if (result.candidate) {
       state.data.project.projectedDailySales = result.candidate.sales;
@@ -759,12 +790,14 @@ function runAutoCorrect() {
         kind: "ready",
         message: `Auto Correct completed. ${salesMessage}; Rent ৳ ${formatMoney(result.candidate.rent)}; Advance ৳ ${formatMoney(result.candidate.advance)}.`,
       };
+      autoCorrectDeadline = 0;
       render();
       return;
     }
     sales += 1000;
   }
 
+  autoCorrectDeadline = 0;
   state.status = { kind: "warning", message: "Auto Correct could not find a practical green combination. The entered Sales, Rent and Advance values were left unchanged." };
   render();
 }
