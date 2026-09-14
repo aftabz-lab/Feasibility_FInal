@@ -15,7 +15,7 @@ import {
   salesGivenByOptions,
 } from "./model.mjs";
 import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-header-cache-v11";
-import { downloadFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js";
+import { downloadFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-pdf-share-v12";
 
 const app = document.querySelector("#app");
 const workbookInput = document.querySelector("#workbook-file");
@@ -184,7 +184,7 @@ function statusHtml() {
   // directly in the status bar so the file is one click from being mailed.
   const fallback = state.shareFallback;
   const shareLinks = fallback
-    ? `<a class="status-link" href="${escapeHtml(mailtoLink(fallback.subject, fallback.body))}">Open Outlook</a><a class="status-link" href="${escapeHtml(whatsappLink(`${fallback.subject}. ${fallback.body}`))}" target="_blank" rel="noopener">Open WhatsApp</a>`
+    ? `<a class="status-link" href="${escapeHtml(mailtoLink(fallback.subject, fallback.body))}">Open Outlook</a><a class="status-link" href="${escapeHtml(whatsappLink(fallback.body))}" target="_blank" rel="noopener">Open WhatsApp</a>`
     : "";
   return `<div class="status status-${escapeHtml(state.status.kind)}"><span class="status-dot"></span>${escapeHtml(state.status.message)}${shareLinks}</div>`;
 }

@@ -422,7 +422,9 @@ function isSpecialYearOneWarning(model, row, timeIndex) {
 }
 
 function hasPdfConditionalFormatting(row) {
-  return row.emphasis && row.label !== "Total Franchise Expenses";
+  return row.emphasis
+    && row.label !== "Total Franchise Expenses"
+    && row.label !== "Franchisee Operating Expenses";
 }
 
 function valueTone(model, row, value, timeIndex = null) {
@@ -668,7 +670,7 @@ export async function shareFeasibilityPdf(data, model, assets = []) {
   const location = String(data?.project?.locationArea || "New location");
   const fileName = `${safeName(location)}_feasibility_report.pdf`;
   const subject = `Feasibility report – ${location}`;
-  const body = "Please find the attached feasibility report.";
+  const body = `Please find the attached feasibility report of ${location}`;
   const blob = doc.output("blob");
   const canUseShareSheet = typeof navigator !== "undefined" && typeof navigator.share === "function";
   const file = typeof File !== "undefined"
