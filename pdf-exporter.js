@@ -2,22 +2,24 @@ import { formatMoney, formatPercent } from "./model.mjs";
 
 /* global jspdf */
 
+// The downloadable PDF is intentionally monochrome. Keeping the existing
+// semantic color aliases preserves every layout, font, emphasis and calculation
+// rule while ensuring all three exported sheets render with black text/lines on
+// white cells and no conditional or decorative color.
 const COLORS = {
-  navy: [15, 36, 58],
-  blue: [30, 77, 115],
-  teal: [14, 112, 105],
-  ink: [25, 37, 50],
-  muted: [87, 104, 119],
-  // Pure black. The old pale grey-blue looked fine on screen but faded to almost
-  // nothing on a printed page.
+  navy: [0, 0, 0],
+  blue: [0, 0, 0],
+  teal: [0, 0, 0],
+  ink: [0, 0, 0],
+  muted: [0, 0, 0],
   line: [0, 0, 0],
-  pale: [247, 250, 252],
-  green: [219, 243, 224],
-  greenText: [20, 100, 50],
-  red: [255, 229, 229],
-  redText: [174, 35, 35],
-  yellow: [255, 242, 204],
-  orange: [248, 197, 139],
+  pale: [255, 255, 255],
+  green: [255, 255, 255],
+  greenText: [0, 0, 0],
+  red: [255, 255, 255],
+  redText: [0, 0, 0],
+  yellow: [255, 255, 255],
+  orange: [255, 255, 255],
   white: [255, 255, 255],
   black: [0, 0, 0],
 };
@@ -132,8 +134,8 @@ function drawPageHeader(doc, title, subtitle, location, pageLabel, exportedAt) {
   const width = doc.internal.pageSize.getWidth();
   const margin = 26;
   const generatedLabel = `Generated: ${formatExportTimestamp(exportedAt)}`;
-  // Keep every non-conditional header white in the PDF.  The thin navy rule
-  // preserves the report hierarchy without introducing a coloured header bar.
+  // Keep every header white in the PDF. The thin black rule preserves the
+  // report hierarchy without introducing a coloured header bar.
   drawRect(doc, 0, 0, width, 42, { fill: COLORS.white, border: false });
   stroke(doc, COLORS.black);
   doc.setLineWidth(1.1);
@@ -626,7 +628,7 @@ async function drawFeasibilityPage(doc, data, model, assets, exportedAt) {
   y = table.y + 10;
   if (model.alerts?.franchisePbtAboveOutletPlYear1) {
     drawRect(doc, table.x, y, table.width, 16, { fill: COLORS.red });
-    drawText(doc, "REVIEW: Year-1 Franchisee PBT is greater than Year-1 P/L considering Outbound Transport. Both values are highlighted in red.", table.x, y + 11, table.width, { size: 7.4, minSize: 6.4, color: COLORS.redText, bold: true, align: "center" });
+    drawText(doc, "REVIEW: Year-1 Franchisee PBT is greater than Year-1 P/L considering Outbound Transport.", table.x, y + 11, table.width, { size: 7.4, minSize: 6.4, color: COLORS.redText, bold: true, align: "center" });
     y += 22;
   }
   y = drawReturnSection(doc, table.x, y, table.width, data, model) + 17;

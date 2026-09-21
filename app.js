@@ -15,7 +15,7 @@ import {
   salesGivenByOptions,
 } from "./model.mjs";
 import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-header-cache-v11";
-import { downloadFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-pdf-share-v12";
+import { downloadFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-pdf-monochrome-v13";
 
 const app = document.querySelector("#app");
 const workbookInput = document.querySelector("#workbook-file");
