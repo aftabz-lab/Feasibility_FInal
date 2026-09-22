@@ -249,7 +249,7 @@ async function drawPageReviewSignature(doc, model, assets, position = {}) {
   }
 }
 
-async function drawForecastPage(doc, data, model, assets, exportedAt) {
+async function drawForecastPage(doc, data, model, assets, exportedAt, options = {}) {
   const pageWidth = doc.internal.pageSize.getWidth();
   let y = drawPageHeader(doc, "SALES FORECASTING TOOLS", "Values-only feasibility output", sourceLabel(model, data), "Page 1 of 3 · Landscape", exportedAt);
   const margin = 26;
@@ -351,10 +351,12 @@ async function drawForecastPage(doc, data, model, assets, exportedAt) {
     getAlign: (row, column) => column === 0 ? "left" : "right",
   });
   const forecastLastTableEnd = Math.max(projectEnd, categoryEnd);
-  await drawPageReviewSignature(doc, model, assets, { x: margin, y: forecastLastTableEnd + 5 });
+  if (options.includePageSignatures !== false) {
+    await drawPageReviewSignature(doc, model, assets, { x: margin, y: forecastLastTableEnd + 5 });
+  }
 }
 
-async function drawInformationPage(doc, data, model, assets, exportedAt) {
+async function drawInformationPage(doc, data, model, assets, exportedAt, options = {}) {
   const pageWidth = doc.internal.pageSize.getWidth();
   let y = drawPageHeader(doc, "BUSINESS FEASIBILITY INFORMATION", "Values-only feasibility output", sourceLabel(model, data), "Page 2 of 3 · Landscape", exportedAt);
   const margin = 26;
@@ -414,7 +416,9 @@ async function drawInformationPage(doc, data, model, assets, exportedAt) {
     getAlign: (row, column) => column === 0 ? "left" : "right",
   });
   const informationLastTableEnd = Math.max(informationEnd, staffEnd);
-  await drawPageReviewSignature(doc, model, assets, { x: margin, y: informationLastTableEnd + 5 });
+  if (options.includePageSignatures !== false) {
+    await drawPageReviewSignature(doc, model, assets, { x: margin, y: informationLastTableEnd + 5 });
+  }
 }
 
 function isSpecialYearOneWarning(model, row, timeIndex) {
@@ -616,7 +620,7 @@ async function drawSignatureBlocks(doc, y, model, assets, options = {}) {
   return y + renderedRows * rowHeight;
 }
 
-async function drawFeasibilityPage(doc, data, model, assets, exportedAt) {
+async function drawFeasibilityPage(doc, data, model, assets, exportedAt, options = {}) {
   const pageWidth = doc.internal.pageSize.getWidth();
   // The feasibility table has its own fixed width. The signature strip uses
   // the full printable page width so its 4 + 3 approval layout is centred.
@@ -632,27 +636,37 @@ async function drawFeasibilityPage(doc, data, model, assets, exportedAt) {
     y += 22;
   }
   y = drawReturnSection(doc, table.x, y, table.width, data, model) + 17;
-  drawRect(doc, signatureX, y, signatureWidth, 14, { fill: COLORS.white, borderColor: COLORS.line });
-  drawText(doc, "APPROVAL & SIGNATURES", signatureX, y + 9.5, signatureWidth, { size: 8.5, minSize: 6.9, color: COLORS.navy, bold: true, align: "center" });
-  await drawSignatureBlocks(doc, y + 12, model, assets, { x: signatureX, width: signatureWidth });
+  if (options.includeSignatorySection !== false) {
+    drawRect(doc, signatureX, y, signatureWidth, 14, { fill: COLORS.white, borderColor: COLORS.line });
+    drawText(doc, "APPROVAL & SIGNATURES", signatureX, y + 9.5, signatureWidth, { size: 8.5, minSize: 6.9, color: COLORS.navy, bold: true, align: "center" });
+    await drawSignatureBlocks(doc, y + 12, model, assets, { x: signatureX, width: signatureWidth });
+  }
 }
 
-export async function buildFeasibilityPdf(data, model, assets = []) {
+export async function buildFeasibilityPdf(data, model, assets = [], options = {}) {
   const jsPDF = globalThis.jspdf?.jsPDF;
   if (!jsPDF) throw new Error("PDF export module did not load. Refresh the page and try again.");
   const exportedAt = new Date();
   const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4", compress: true });
-  await drawForecastPage(doc, data, model, assets, exportedAt);
+  await drawForecastPage(doc, data, model, assets, exportedAt, options);
   doc.addPage("a4", "landscape");
-  await drawInformationPage(doc, data, model, assets, exportedAt);
+  await drawInformationPage(doc, data, model, assets, exportedAt, options);
   doc.addPage("a3", "portrait");
-  await drawFeasibilityPage(doc, data, model, assets, exportedAt);
+  await drawFeasibilityPage(doc, data, model, assets, exportedAt, options);
   return doc;
 }
 
 export async function downloadFeasibilityPdf(data, model, assets = []) {
   const doc = await buildFeasibilityPdf(data, model, assets);
   doc.save(`${safeName(data.project.locationArea)}_feasibility_report.pdf`);
+}
+
+export async function downloadManagementFeasibilityPdf(data, model, assets = []) {
+  const doc = await buildFeasibilityPdf(data, model, assets, {
+    includePageSignatures: false,
+    includeSignatorySection: false,
+  });
+  doc.save(`${safeName(data.project.locationArea)}_management_feasibility_report.pdf`);
 }
 
 export function mailtoLink(subject = "", body = "") {

@@ -15,7 +15,7 @@ import {
   salesGivenByOptions,
 } from "./model.mjs";
 import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-header-cache-v11";
-import { downloadFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-pdf-monochrome-v13";
+import { downloadFeasibilityPdf, downloadManagementFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-management-pdf-v15";
 
 const app = document.querySelector("#app");
 const workbookInput = document.querySelector("#workbook-file");
@@ -212,7 +212,7 @@ function headerHtml() {
           </div>
           <button class="btn btn-secondary" type="button" data-action="upload-workbook">Load Excel</button>
           <button class="btn btn-primary" type="button" data-action="download-rules-xlsx">Download Excel with Rules</button>
-          <button class="btn btn-pdf" type="button" data-action="download-pdf">Download 3-page PDF</button><button class="btn btn-secondary" type="button" data-action="share-pdf">Share PDF</button>
+          <div class="pdf-download-stack"><button class="btn btn-pdf" type="button" data-action="download-pdf">Download 3-page PDF</button><button class="btn btn-pdf" type="button" data-action="download-management-pdf">Management PDF</button></div><button class="btn btn-secondary" type="button" data-action="share-pdf">Share PDF</button>
         </div>
       </header>
       <nav class="navigation" aria-label="Dashboard sections">${navHtml()}</nav>
@@ -1105,6 +1105,20 @@ async function downloadPdfExport() {
   render();
 }
 
+async function downloadManagementPdfExport() {
+  // Match the standard PDF's latest recalculated dashboard state while using
+  // the management-only export path that omits every signature and signatory block.
+  recalculate();
+  try {
+    setStatus("loading", "Creating the three-page Management PDF…");
+    await downloadManagementFeasibilityPdf(state.data, state.model, state.signatureAssets);
+    state.status = { kind: "ready", message: "Management PDF downloaded successfully." };
+  } catch (error) {
+    state.status = { kind: "error", message: `Management PDF export failed: ${error.message}` };
+  }
+  render();
+}
+
 app.addEventListener("click", (event) => {
   const view = event.target.closest("[data-view]");
   if (view) {
@@ -1120,6 +1134,7 @@ app.addEventListener("click", (event) => {
   if (actionName === "download-xlsx") downloadExport();
   if (actionName === "download-rules-xlsx") downloadRulesExport();
   if (actionName === "download-pdf") downloadPdfExport();
+  if (actionName === "download-management-pdf") downloadManagementPdfExport();
   if (actionName === "share-pdf") sharePdfExport();
   if (actionName === "auto-correct") {
     runAutoCorrect();

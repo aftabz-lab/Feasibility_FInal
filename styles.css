@@ -82,6 +82,8 @@ h3 { margin-bottom: 0; color: var(--ink); font-size: 1rem; letter-spacing: -0.02
 }
 .eyebrow { margin: 0 0 3px; color: #79c7f2; font-size: 0.69rem; font-weight: 800; letter-spacing: 0.115em; text-transform: uppercase; }
 .top-actions, .button-group, .export-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 9px; }
+.pdf-download-stack { display: grid; width: max-content; gap: 6px; }
+.pdf-download-stack .btn { width: 100%; white-space: nowrap; }
 .mode-chip { padding: 8px 11px; border: 1px solid #2a5979; border-radius: 999px; color: #bde6fd; background: rgba(27, 86, 126, 0.20); font-size: 0.76rem; font-weight: 700; white-space: nowrap; }
 
 .btn {
