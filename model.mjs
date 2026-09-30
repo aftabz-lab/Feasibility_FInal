@@ -369,6 +369,7 @@ export const defaultData = {
     openedBy: "",
     openedDesignation: "",
     existingOutlets: 0,
+    includeExistingOutlets: false,
     gpPercentOverride: null,
     gpShareOverride: null,
   },

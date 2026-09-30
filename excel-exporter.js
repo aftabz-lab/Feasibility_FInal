@@ -430,8 +430,10 @@ async function addScoreSheet(workbook, data, model, assets, exportedAt) {
     ["Projected Basket Size", model.inputs.basketSize, "number"],
     ["Projected Per Day Sales", model.inputs.dailySales, "currency"],
     ["Projected Daily Footfall", model.inputs.dailyFootfall, "number"],
-    ["Existing outlets around 1 KM", data.project.existingOutlets, "integer"],
   ];
+  if (data.project.includeExistingOutlets === true) {
+    detailRows.push(["Existing outlets around 1 KM", data.project.existingOutlets, "integer"]);
+  }
   detailRows.forEach(([label, value, type], index) => {
     const rowNo = detailStart + 1 + index;
     sheet.mergeCells(`A${rowNo}:B${rowNo}`);
@@ -1169,7 +1171,7 @@ function removeOrphanSharedFormulaReferences(zip, path) {
   writeXmlContent(entry, xml);
 }
 
-function hideWorksheetRows(zip, path, rows) {
+function setWorksheetRowsHidden(zip, path, rows, hidden) {
   const entry = zipEntry(zip, path);
   if (!entry) throw new Error(`The master workbook is missing ${path}.`);
   let xml = readXmlContent(entry);
@@ -1177,10 +1179,14 @@ function hideWorksheetRows(zip, path, rows) {
     const pattern = new RegExp(`<row\\b(?=[^>]*\\br="${rowNumber}")[^>]*>`, "i");
     xml = xml.replace(pattern, (tag) => {
       let revised = tag.replace(/\s+hidden="[^"]*"/i, "");
-      return revised.replace(/>$/, ' hidden="1">');
+      return hidden ? revised.replace(/>$/, ' hidden="1">') : revised;
     });
   });
   writeXmlContent(entry, xml);
+}
+
+function hideWorksheetRows(zip, path, rows) {
+  setWorksheetRowsHidden(zip, path, rows, true);
 }
 
 
@@ -2097,6 +2103,12 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     zip,
     paths.get("Sales forecasting tools"),
     forecastCalculatedFormulas,
+  );
+  setWorksheetRowsHidden(
+    zip,
+    paths.get("Sales forecasting tools"),
+    [33],
+    data?.project?.includeExistingOutlets !== true,
   );
 
   const informationValues = {

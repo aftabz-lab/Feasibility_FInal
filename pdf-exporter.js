@@ -318,8 +318,10 @@ async function drawForecastPage(doc, data, model, assets, exportedAt, options = 
     ["Projected Basket Size (Reference)", formatMoney(model.inputs.basketSize, 1), "input"],
     ["Projected Per Day Sales for this New Location", formatMoney(model.inputs.dailySales), "input"],
     ["Projected Daily Footfall for this New Location", formatMoney(model.inputs.dailyFootfall, 1), "input"],
-    ["Existing No. of Outlets Around 1 KM Radius", formatMoney(data.project.existingOutlets, 0)],
   ];
+  if (data.project.includeExistingOutlets === true) {
+    projectRows.push(["Existing No. of Outlets Around 1 KM Radius", formatMoney(data.project.existingOutlets, 0)]);
+  }
   const projectEnd = drawLabelValueTable(doc, margin, scoreEnd + 13, leftWidth, projectRows, {
     title: "PROJECT & REFERENCE INFORMATION",
     labelWidth: 290,

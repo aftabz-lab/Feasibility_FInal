@@ -13,9 +13,9 @@ import {
   getSignatoryAutoLink,
   openedByOptions,
   salesGivenByOptions,
-} from "./model.mjs";
-import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-header-cache-v11";
-import { downloadFeasibilityPdf, downloadManagementFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-management-pdf-v15";
+} from "./model.mjs?v=feasibility-optional-existing-outlets-v16";
+import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-optional-existing-outlets-v16";
+import { downloadFeasibilityPdf, downloadManagementFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-optional-existing-outlets-v16";
 
 const app = document.querySelector("#app");
 const workbookInput = document.querySelector("#workbook-file");
@@ -342,6 +342,18 @@ function textField(label, path, options = {}) {
   return `<label class="field"><span>${escapeHtml(label)}${options.hint ? `<em>${escapeHtml(options.hint)}</em>` : ""}</span><input ${optional} ${percentPoints} data-path="${escapeHtml(path)}" type="${type}" value="${escapeHtml(inputValue)}" ${attributes}></label>`;
 }
 
+function optionalExportNumberField(label, valuePath, includePath, options = {}) {
+  const value = getPath(state.data, valuePath);
+  const included = getPath(state.data, includePath) === true;
+  const inputId = `optional-export-${String(valuePath).replace(/[^a-z0-9_-]+/gi, "-")}`;
+  const attributes = [
+    options.min !== undefined ? `min="${options.min}"` : "",
+    options.max !== undefined ? `max="${options.max}"` : "",
+    options.step !== undefined ? `step="${options.step}"` : "",
+  ].filter(Boolean).join(" ");
+  return `<div class="field optional-export-field ${included ? "optional-export-on" : "optional-export-off"}"><span><label for="${escapeHtml(inputId)}">${escapeHtml(label)}</label><label class="optional-export-toggle"><input data-path="${escapeHtml(includePath)}" type="checkbox" ${included ? "checked" : ""}><span>Include in Excel &amp; PDFs</span></label></span><input id="${escapeHtml(inputId)}" data-path="${escapeHtml(valuePath)}" type="number" value="${escapeHtml(valueForInput(value))}" ${attributes}></div>`;
+}
+
 function automaticField(label, value, hint = "") {
   return `<label class="field field-automatic"><span>${escapeHtml(label)}${hint ? `<em>${escapeHtml(hint)}</em>` : ""}</span><output>${escapeHtml(value)}</output></label>`;
 }
@@ -467,7 +479,7 @@ function renderDataEntry() {
           ${textField("Monthly Rent", "project.monthlyRent", { type: "number", min: 0, step: 1 })}
           ${textField("Advance", "project.advance", { type: "number", min: 0, step: 1 })}
           ${textField("Outbound Transport / Month", "project.outboundTransport", { type: "number", min: 0, step: 1, hint: outboundTransportHint() })}
-          ${textField("Existing Outlet No. within 1 KM", "project.existingOutlets", { type: "number", min: 0, step: 1 })}
+          ${optionalExportNumberField("Existing Outlet No. within 1 KM", "project.existingOutlets", "project.includeExistingOutlets", { min: 0, step: 1 })}
         </div>`)}
         ${sectionCard("GP controls", "Enter a whole percentage: 16 means 16%. You may also use the prior decimal style, such as 0.16. Leave either manual field blank to retain the automatic calculation.", `<div class="override-grid">
           <div class="override-box"><div><span>GP%</span>${autoBadge(model.modes.gpPercent === "Manual")}</div>${textField("Manual GP%", "project.gpPercentOverride", { type: "number", min: 0, max: 100, step: 0.01, optional: true, percentPoints: true, hint: `Auto: ${formatPercent(model.inputs.gpPercent, 2)} · Enter 16 or 0.16 for 16%` })}<button class="text-button" type="button" data-action="clear-override" data-path="project.gpPercentOverride">Use automatic GP%</button></div>
@@ -910,7 +922,14 @@ function applyChange(target) {
     getSignatoryAutoLink(person)?.source === "opened-by"
   ));
   const signatory3CheckboxPath = signatory3Index >= 0 ? `signatories.${signatory3Index}.includeInPdf` : "";
-  state.status = path === signatory3CheckboxPath
+  state.status = path === "project.includeExistingOutlets"
+    ? {
+      kind: "ready",
+      message: selectedValue === true
+        ? "Existing Outlet No. within 1 KM will be included in Excel and both PDFs."
+        : "Existing Outlet No. within 1 KM will be omitted from Excel and both PDFs.",
+    }
+    : path === signatory3CheckboxPath
     ? {
       kind: "ready",
       message: selectedValue === true
