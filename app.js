@@ -13,10 +13,15 @@ import {
   getSignatoryAutoLink,
   openedByOptions,
   salesGivenByOptions,
-} from "./model.mjs?v=feasibility-edited-rules-zone-count-v17";
-import { geocodeLocationArea, loadOutletLocations, outletsWithinRadius } from "./geo-outlets.js?v=feasibility-edited-rules-zone-count-v17";
-import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-edited-rules-zone-count-v17";
-import { downloadFeasibilityPdf, downloadManagementFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-edited-rules-zone-count-v17";
+} from "./model.mjs?v=feasibility-edited-rules-zone-count-v18";
+import {
+  assessLocationEnvironment,
+  geocodeLocationArea,
+  loadOutletLocations,
+  outletsWithinRadius,
+} from "./geo-outlets.js?v=feasibility-edited-rules-zone-count-v18";
+import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-edited-rules-zone-count-v18";
+import { downloadFeasibilityPdf, downloadManagementFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-edited-rules-zone-count-v18";
 
 const app = document.querySelector("#app");
 const workbookInput = document.querySelector("#workbook-file");
@@ -33,6 +38,7 @@ const state = {
   outletLocations: [],
   outletLocationMeta: {},
   locationLookup: { kind: "loading", message: "Loading the zone outlet map…" },
+  locationAssessment: { kind: "waiting", message: "Enter a complete location address and select District for automatic assessment." },
 };
 
 let locationLookupToken = 0;
@@ -157,6 +163,11 @@ function setPath(object, path, value) {
 
 function clearInitialSelections(data) {
   blankInitialSelectionPaths.forEach((path) => setPath(data, path, ""));
+  data.forecast.worshipCount = 0;
+  data.forecast.educationCount = 0;
+  data.forecast.bankOfficeCount = 0;
+  data.forecast.hotelRestaurantHospitalCount = 0;
+  data.locationAssessment = null;
   data.project.openedDesignation = "";
 }
 
@@ -188,41 +199,122 @@ function locationLookupMessage(kind, message) {
   state.locationLookup = { kind, message };
 }
 
-async function refreshExistingOutletCount() {
-  const token = ++locationLookupToken;
-  if (state.data.project.includeExistingOutlets !== true) {
-    locationLookupMessage("off", "Automatic 1 KM outlet count is currently excluded from exports.");
-    render();
-    return;
-  }
-  if (!state.data.project.locationArea || !state.data.project.district) {
-    locationLookupMessage("waiting", "Enter a complete location address and select District to calculate the 1 KM count.");
-    render();
-    return;
-  }
-  if (!state.outletLocations.length) {
-    locationLookupMessage("warning", "The zone outlet map is unavailable; the number remains editable manually.");
-    render();
-    return;
-  }
+function locationAssessmentMessage(kind, message) {
+  state.locationAssessment = { kind, message };
+}
 
-  locationLookupMessage("loading", "Checking the address against outlet map points in the selected district…");
+function clearAutomaticLocationAssessment() {
+  state.data.forecast.roadStatus = "";
+  state.data.forecast.worshipCount = 0;
+  state.data.forecast.educationCount = 0;
+  state.data.forecast.bankOfficeCount = 0;
+  state.data.forecast.publicTransit = "";
+  state.data.forecast.signboardVisibility = "";
+  state.data.forecast.hotelRestaurantHospitalCount = 0;
+  state.data.locationAssessment = null;
+}
+
+function applyAutomaticLocationAssessment(assessment, target, existingOutletMatches) {
+  state.data.forecast.roadStatus = assessment.roadStatus;
+  state.data.forecast.worshipCount = assessment.worshipCount;
+  state.data.forecast.educationCount = assessment.educationCount;
+  state.data.forecast.bankOfficeCount = assessment.bankOfficeCount;
+  state.data.forecast.publicTransit = assessment.publicTransit;
+  state.data.forecast.signboardVisibility = assessment.signboardVisibility;
+  state.data.forecast.hotelRestaurantHospitalCount = assessment.hotelRestaurantHospitalCount;
+  state.data.locationAssessment = {
+    ...assessment,
+    targetLabel: target.label || state.data.project.locationArea,
+    geocoder: target.provider || "",
+    existingOutletMatches: existingOutletMatches.map((outlet) => ({
+      code: outlet.code,
+      name: outlet.name,
+      district: outlet.district,
+      lat: outlet.lat,
+      lon: outlet.lon,
+      distanceKm: outlet.distanceKm,
+    })),
+  };
+}
+
+async function refreshLocationIntelligence() {
+  const token = ++locationLookupToken;
+  if (!state.data.project.locationArea || !state.data.project.district) {
+    clearAutomaticLocationAssessment();
+    locationLookupMessage("waiting", "Enter a complete location address and select District to calculate the 1 KM count.");
+    locationAssessmentMessage("waiting", "Enter a complete location address and select District for automatic assessment.");
+    recalculate();
+    render();
+    return;
+  }
+  clearAutomaticLocationAssessment();
+  locationLookupMessage(
+    state.data.project.includeExistingOutlets === true ? "loading" : "off",
+    state.data.project.includeExistingOutlets === true
+      ? "Checking the address against outlet map points in the selected district…"
+      : "Automatic 1 KM outlet count is excluded from Excel and PDFs; the location assessment will still run.",
+  );
+  locationAssessmentMessage("loading", "Checking mapped roads and facilities around the entered location…");
+  recalculate();
   render();
   try {
     const target = await geocodeLocationArea(state.data.project.locationArea, state.data.project.district);
     if (token !== locationLookupToken) return;
-    const matches = outletsWithinRadius(state.outletLocations, target, state.data.project.district, 1);
-    state.data.project.existingOutlets = matches.length;
+    const matches = state.outletLocations.length
+      ? outletsWithinRadius(state.outletLocations, target, state.data.project.district, 1)
+      : [];
+    if (state.data.project.includeExistingOutlets === true && state.outletLocations.length) {
+      state.data.project.existingOutlets = matches.length;
+    }
+
+    let assessment = null;
+    let assessmentError = null;
+    try {
+      assessment = await assessLocationEnvironment(target);
+    } catch (error) {
+      assessmentError = error;
+    }
+    if (token !== locationLookupToken) return;
+
+    if (assessment) {
+      applyAutomaticLocationAssessment(assessment, target, matches);
+      const roadText = assessment.roadStatus === "M" ? "Main road" : assessment.roadStatus === "S" ? "Support road" : "No mapped road";
+      locationAssessmentMessage(
+        "ready",
+        `Automatic map assessment completed: ${roadText}; nearby counts and visibility were refreshed within the stated map radiuses.`,
+      );
+    } else {
+      state.data.locationAssessment = {
+        latitude: Number(target.lat),
+        longitude: Number(target.lon),
+        targetLabel: target.label || state.data.project.locationArea,
+        geocoder: target.provider || "",
+        existingOutletMatches: matches,
+      };
+      locationAssessmentMessage("warning", `${assessmentError?.message || "Nearby map assessment failed."} Recheck the address to retry.`);
+    }
+
+    if (state.data.project.includeExistingOutlets !== true) {
+      locationLookupMessage("off", "Automatic 1 KM outlet count is excluded from Excel and PDFs.");
+    } else if (state.outletLocations.length) {
+      const mappedInDistrict = state.outletLocations.filter((outlet) => outlet.district === state.data.project.district).length;
+      locationLookupMessage(
+        "ready",
+        `${matches.length} existing outlet${matches.length === 1 ? "" : "s"} found within 1 KM. Checked ${mappedInDistrict} mapped outlet${mappedInDistrict === 1 ? "" : "s"} in ${state.data.project.district}.`,
+      );
+    } else {
+      locationLookupMessage("warning", "The zone outlet map is unavailable; the number remains editable manually.");
+    }
     recalculate();
-    const mappedInDistrict = state.outletLocations.filter((outlet) => outlet.district === state.data.project.district).length;
-    locationLookupMessage(
-      "ready",
-      `${matches.length} existing outlet${matches.length === 1 ? "" : "s"} found within 1 KM. Checked ${mappedInDistrict} mapped outlet${mappedInDistrict === 1 ? "" : "s"} in ${state.data.project.district}.`,
-    );
-    state.status = { kind: "ready", message: `Existing Outlet No. within 1 KM updated automatically to ${matches.length}.` };
+    state.status = assessment
+      ? { kind: "ready", message: "Location assessment and linked forecasting selections updated automatically." }
+      : { kind: "warning", message: "Existing-outlet check completed, but nearby forecasting selections could not be refreshed." };
   } catch (error) {
     if (token !== locationLookupToken) return;
     locationLookupMessage("warning", `${error.message} The number remains editable manually.`);
+    locationAssessmentMessage("warning", `${error.message} Automatic forecasting selections were cleared to prevent stale results.`);
+    clearAutomaticLocationAssessment();
+    recalculate();
   }
   render();
 }
@@ -411,6 +503,18 @@ function existingOutletLookupHtml() {
   return `<p class="location-lookup-note location-lookup-${escapeHtml(lookup.kind || "waiting")}">${escapeHtml(lookup.message || "Enter a location and select District to calculate the 1 KM count.")}${escapeHtml(suffix)}</p>`;
 }
 
+function locationAssessmentHtml() {
+  const assessment = state.locationAssessment || {};
+  return `<p class="location-lookup-note location-lookup-${escapeHtml(assessment.kind || "waiting")}">${escapeHtml(assessment.message || "Enter a location and select District for automatic assessment.")} <button class="text-button" type="button" data-action="refresh-location-assessment">Recheck map</button></p>`;
+}
+
+function automaticAssessmentValue(value, labels = null) {
+  if (state.locationAssessment?.kind !== "ready") return "Pending map check";
+  if (value === null || value === undefined || value === "") return "Pending map check";
+  if (labels && Object.prototype.hasOwnProperty.call(labels, value)) return `${value} — ${labels[value]}`;
+  return String(value);
+}
+
 function automaticField(label, value, hint = "") {
   return `<label class="field field-automatic"><span>${escapeHtml(label)}${hint ? `<em>${escapeHtml(hint)}</em>` : ""}</span><output>${escapeHtml(value)}</output></label>`;
 }
@@ -548,16 +652,16 @@ function renderDataEntry() {
           ${selectField("Opened by", "project.openedBy", openedByOptions, { labelFn: (item) => item.name, valueFn: (item) => item.name, freeText: true, placeholder: "Search or type a name" })}
           ${textField("Opened by Designation", "project.openedDesignation", { placeholder: "Type the designation" })}
         </div>`)}
-        ${sectionCard("Sales forecasting assessment", "The score, weightage and forecast classification update automatically.", `<div class="field-grid two">
+        ${sectionCard("Sales forecasting assessment", "Road type, nearby facility counts, transport and signboard visibility are selected automatically from the entered location. Long-feet remains a user input above.", `<div class="field-grid two">
           ${textField("Avg. Sales of Departmental Stores / Competitor Store", "forecast.avgDepartmentalSales", { type: "number", min: 0, step: 1 })}
-          ${selectField("Road Status", "forecast.roadStatus", ["M", "S", "B"])}
-          ${textField("Mosque / Mandir / Girza", "forecast.worshipCount", { type: "number", min: 0, step: 1 })}
-          ${textField("School / College / University", "forecast.educationCount", { type: "number", min: 0, step: 1 })}
-          ${textField("Bank / Office / ATM Booth", "forecast.bankOfficeCount", { type: "number", min: 0, step: 1 })}
-          ${selectField("CNG / Bus / Train / Pick & Drop", "forecast.publicTransit", ["Y", "N"])}
-          ${selectField("Signboard Visibility", "forecast.signboardVisibility", ["H", "M", "L"])}
-          ${textField("Hotel / Restaurant / Hospital / Club", "forecast.hotelRestaurantHospitalCount", { type: "number", min: 0, step: 1 })}
-        </div>`)}
+          ${automaticField("Road Status", automaticAssessmentValue(data.forecast.roadStatus, { M: "Main road", S: "Support road", B: "No mapped road" }), "Nearest mapped drivable road within 150 m")}
+          ${automaticField("Mosque / Mandir / Girza", automaticAssessmentValue(data.forecast.worshipCount), "Mapped facilities within 1 KM")}
+          ${automaticField("School / College / University", automaticAssessmentValue(data.forecast.educationCount), "Mapped facilities within 1 KM")}
+          ${automaticField("Bank / Office / ATM Booth", automaticAssessmentValue(data.forecast.bankOfficeCount), "Mapped facilities within 1 KM")}
+          ${automaticField("CNG / Bus / Train / Pick & Drop", automaticAssessmentValue(data.forecast.publicTransit, { Y: "Found", N: "Not found" }), "At least one mapped transport feature within 1 KM")}
+          ${automaticField("Signboard Visibility", automaticAssessmentValue(data.forecast.signboardVisibility, { H: "High", M: "Medium", L: "Low" }), "Derived from the mapped road class")}
+          ${automaticField("Hotel / Restaurant / Hospital / Club", automaticAssessmentValue(data.forecast.hotelRestaurantHospitalCount), "Mapped facilities within 1 KM")}
+        </div>${locationAssessmentHtml()}`)}
         ${sectionCard("Sales category mix", "Edit the category labels or shares used by the Sales Forecasting Tools export.", `<div class="table-scroll category-table"><table class="input-table"><thead><tr><th>Category</th><th>Share (decimal)</th><th>Displayed</th></tr></thead><tbody>${categoryRows}</tbody></table></div>`)}
       </div>
       <div class="entry-column">
@@ -895,7 +999,7 @@ function renderFeasibility() {
 }
 
 function renderHelp() {
-  return `<section class="page help-page"><div class="page-title-row"><div><p class="eyebrow">GitHub-ready package</p><h2>How to use this dashboard</h2><p class="page-subtitle">No server or database is needed.</p></div></div><div class="guide-grid"><article class="panel"><span class="step-number">1</span><h3>Upload the package</h3><p>Create a new GitHub repository, upload all extracted files, then use GitHub Pages from the <strong>main</strong> branch root.</p></article><article class="panel"><span class="step-number">2</span><h3>Replace Excel any time</h3><p>Use <strong>Load Excel</strong> in the dashboard for any filename. For a permanent repository source, replace <code>data/source-workbook.xlsx</code> or update <code>data/workbook-manifest.json</code>.</p></article><article class="panel"><span class="step-number">3</span><h3>Add signatures</h3><p>Put a PNG/JPG in <code>signs/</code>, add it to <code>signs/manifest.json</code>, then select it from Data Entry. Each signature is centred across a dashed signature line.</p></article><article class="panel"><span class="step-number">4</span><h3>Download output</h3><p>Excel contains only the three requested sheets. The PDF is exactly three pages: Sales Forecasting and Information in landscape, Auto Generated Feasibility in portrait.</p></article></div><article class="panel compatibility-panel"><h3>Compatible workbook requirement</h3><p>To load a replacement source correctly, retain the three output sheet names and their same data layout. Extra hidden or reference sheets may remain in the source file; they are never included in the download.</p></article></section>`;
+  return `<section class="page help-page"><div class="page-title-row"><div><p class="eyebrow">GitHub-ready package</p><h2>How to use this dashboard</h2><p class="page-subtitle">No server or database is needed.</p></div></div><div class="guide-grid"><article class="panel"><span class="step-number">1</span><h3>Upload the package</h3><p>Create a new GitHub repository, upload all extracted files, then use GitHub Pages from the <strong>main</strong> branch root.</p></article><article class="panel"><span class="step-number">2</span><h3>Replace Excel any time</h3><p>Use <strong>Load Excel</strong> in the dashboard for any filename. For a permanent repository source, replace <code>data/source-workbook.xlsx</code> or update <code>data/workbook-manifest.json</code>.</p></article><article class="panel"><span class="step-number">3</span><h3>Add signatures</h3><p>Put a PNG/JPG in <code>signs/</code>, add it to <code>signs/manifest.json</code>, then select it from Data Entry. Each signature is centred across a dashed signature line.</p></article><article class="panel"><span class="step-number">4</span><h3>Download output</h3><p>The rules Excel links forecast selections to a hidden <code>Dashboard Rules</code> sheet and adds an <code>Existing outlets within 1 KM</code> detail sheet. The PDF remains exactly three pages.</p></article></div><article class="panel compatibility-panel"><h3>Compatible workbook requirement</h3><p>To load a replacement source correctly, retain the three output sheet names and their same data layout. Existing reference sheets remain hidden and untouched in the rules workbook.</p></article></section>`;
 }
 
 function renderContent() {
@@ -944,7 +1048,7 @@ function applyDistrictSelection(target) {
     ? { kind: "ready", message: `${selected.district} selected. Division updated to ${selected.division}. Outbound Transport / Month set to ৳ ${formatMoney(state.data.project.outboundTransport)}; you can change it manually.` }
     : { kind: "ready", message: "District selection cleared." };
   render();
-  void refreshExistingOutletCount();
+  void refreshLocationIntelligence();
 }
 
 function applyChange(target) {
@@ -999,7 +1103,7 @@ function applyChange(target) {
     : { kind: "ready", message: "Inputs updated. All report values refreshed." };
   render();
   if (path === "project.locationArea" || path === "project.includeExistingOutlets") {
-    void refreshExistingOutletCount();
+    void refreshLocationIntelligence();
   }
 }
 
@@ -1032,6 +1136,8 @@ async function loadWorkbookFromBuffer(buffer, sourceName) {
   }
   const workbook = XLSX.read(buffer, { type: "array", cellFormula: true, cellStyles: false, cellNF: true });
   state.data = extractFromWorkbook(workbook, sourceName);
+  state.locationAssessment = { kind: "waiting", message: "Enter a complete location address and select District for automatic assessment." };
+  state.locationLookup = { kind: "waiting", message: "Enter a complete location address and select District to calculate the 1 KM count." };
   state.firstFeasibilityEntry = null;
   recalculate();
 }
@@ -1234,6 +1340,10 @@ app.addEventListener("click", (event) => {
   if (actionName === "download-pdf") downloadPdfExport();
   if (actionName === "download-management-pdf") downloadManagementPdfExport();
   if (actionName === "share-pdf") sharePdfExport();
+  if (actionName === "refresh-location-assessment") {
+    void refreshLocationIntelligence();
+    return;
+  }
   if (actionName === "auto-correct") {
     runAutoCorrect();
     return;
@@ -1254,6 +1364,7 @@ app.addEventListener("click", (event) => {
     state.data = cloneData(defaultData);
     state.firstFeasibilityEntry = null;
     locationLookupMessage("waiting", "Enter a complete location address and select District to calculate the 1 KM count.");
+    locationAssessmentMessage("waiting", "Enter a complete location address and select District for automatic assessment.");
     recalculate();
     state.status = { kind: "ready", message: "Built-in baseline restored." };
     render();

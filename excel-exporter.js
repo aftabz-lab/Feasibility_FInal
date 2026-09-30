@@ -909,6 +909,9 @@ const REPORT_SHEET_NAMES = [
   "AUTO GENERATED FEASIBILITY",
 ];
 
+const DASHBOARD_RULES_SHEET_NAME = "Dashboard Rules";
+const EXISTING_OUTLETS_SHEET_NAME = "Existing outlets within 1 KM";
+
 function removeExistingReportSheets(workbook) {
   const names = new Set(REPORT_SHEET_NAMES.map((name) => name.toLocaleLowerCase()));
   const sheetsToReplace = workbook.worksheets.filter((sheet) =>
@@ -1232,6 +1235,236 @@ function upsertZipEntry(zip, path, content) {
   const cfbApi = getCfbApi();
   if (!cfbApi.utils?.cfb_add) throw new Error("The workbook package cannot add the approval snapshot.");
   cfbApi.utils.cfb_add(zip, path, bytes);
+}
+
+function encodeXmlAttribute(value) {
+  return encodeXmlText(value)
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function supportSheetCell(address, value, formula = "") {
+  if (formula) {
+    const cached = typeof value === "number" && Number.isFinite(value)
+      ? `<v>${value}</v>`
+      : `<v>${encodeXmlText(value ?? "")}</v>`;
+    const type = typeof value === "number" && Number.isFinite(value) ? "" : ' t="str"';
+    return `<c r="${address}"${type}><f>${encodeXmlText(String(formula).replace(/^=/, ""))}</f>${cached}</c>`;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return `<c r="${address}"><v>${value}</v></c>`;
+  }
+  const text = String(value ?? "");
+  const preserve = /^\s|\s$/.test(text) ? ' xml:space="preserve"' : "";
+  return `<c r="${address}" t="inlineStr"><is><t${preserve}>${encodeXmlText(text)}</t></is></c>`;
+}
+
+function supportSheetRow(rowNumber, cells, height = null) {
+  const heightAttributes = height ? ` ht="${height}" customHeight="1"` : "";
+  return `<row r="${rowNumber}"${heightAttributes}>${cells.join("")}</row>`;
+}
+
+function dashboardRulesWorksheetXml(data) {
+  const assessment = data?.locationAssessment || {};
+  const forecast = data?.forecast || {};
+  const roadRadius = Number(assessment.roadRadiusM || 150);
+  const poiRadius = Number(assessment.poiRadiusM || 1000);
+  const source = assessment.provider || "OpenStreetMap / Overpass";
+  const rows = [
+    supportSheetRow(1, [supportSheetCell("A1", "Dashboard Rules")], 24),
+    supportSheetRow(2, [supportSheetCell("A2", "Hidden rule sheet. Sales forecasting F8:F15 links to the dashboard results in column B. Re-enter the location in the dashboard to refresh map results.")], 34),
+    supportSheetRow(4, [
+      supportSheetCell("A4", "Forecast field"),
+      supportSheetCell("B4", "Dashboard result"),
+      supportSheetCell("C4", "Automatic selection rule"),
+      supportSheetCell("D4", "Forecast scoring rule"),
+      supportSheetCell("E4", "Source"),
+    ], 26),
+    supportSheetRow(5, [
+      supportSheetCell("A5", "Road Status"),
+      supportSheetCell("B5", forecast.roadStatus || ""),
+      supportSheetCell("C5", `Nearest mapped drivable road within ${roadRadius} m. M = motorway/trunk/primary/secondary/tertiary (including *_link); S = unclassified/residential/service/living_street/road; B = no mapped drivable road.`),
+      supportSheetCell("D5", "M = 100; S = 80; B/blank = 0"),
+      supportSheetCell("E5", source),
+    ], 52),
+    supportSheetRow(6, [
+      supportSheetCell("A6", "Mosque / Mandir / Girza"),
+      supportSheetCell("B6", Number(forecast.worshipCount || 0)),
+      supportSheetCell("C6", `Count distinct mapped place_of_worship features and mosque/temple/church buildings within ${poiRadius} m.`),
+      supportSheetCell("D6", "2 or more = 100; 1 = 80; 0 = 0"),
+      supportSheetCell("E6", source),
+    ], 42),
+    supportSheetRow(7, [
+      supportSheetCell("A7", "School / College / University"),
+      supportSheetCell("B7", Number(forecast.educationCount || 0)),
+      supportSheetCell("C7", `Count distinct mapped school, college and university features within ${poiRadius} m.`),
+      supportSheetCell("D7", "2 or more = 100; 1 = 80; 0 = 0"),
+      supportSheetCell("E7", source),
+    ], 42),
+    supportSheetRow(8, [
+      supportSheetCell("A8", "Bank / Office / ATM Booth"),
+      supportSheetCell("B8", Number(forecast.bankOfficeCount || 0)),
+      supportSheetCell("C8", `Count distinct mapped bank, ATM and office features within ${poiRadius} m.`),
+      supportSheetCell("D8", "2 or more = 100; 1 = 80; 0 = 0"),
+      supportSheetCell("E8", source),
+    ], 42),
+    supportSheetRow(9, [
+      supportSheetCell("A9", "CNG / Bus / Train Station / Pick & Drop"),
+      supportSheetCell("B9", forecast.publicTransit || ""),
+      supportSheetCell("C9", `Y when at least one mapped bus station/stop, taxi point, public-transport feature, railway station/halt/tram stop or CNG-fuel point exists within ${poiRadius} m; otherwise N.`),
+      supportSheetCell("D9", "Y = 100; N/blank = 0"),
+      supportSheetCell("E9", source),
+    ], 52),
+    supportSheetRow(10, [
+      supportSheetCell("A10", "Front Fascia (Long-feet)"),
+      supportSheetCell("B10", Number(data?.project?.longFeet || 0), "Master!C10"),
+      supportSheetCell("C10", "User-provided dashboard input only. No map selection is applied."),
+      supportSheetCell("D10", "0 = 0; 20 or more = 100; 1 to 19 = 80"),
+      supportSheetCell("E10", "Dashboard user input"),
+    ], 42),
+    supportSheetRow(11, [
+      supportSheetCell("A11", "Signboard Visibility"),
+      supportSheetCell("B11", forecast.signboardVisibility || ""),
+      supportSheetCell("C11", "H when Road Status is M; M when Road Status is S; L when Road Status is B."),
+      supportSheetCell("D11", "H = 100; M = 80; L/blank = 0"),
+      supportSheetCell("E11", "Derived from dashboard Road Status"),
+    ], 42),
+    supportSheetRow(12, [
+      supportSheetCell("A12", "Hotel / Restaurant / Hospital / Club"),
+      supportSheetCell("B12", Number(forecast.hotelRestaurantHospitalCount || 0)),
+      supportSheetCell("C12", `Count distinct mapped hotels, restaurants, hospitals and club-tagged features within ${poiRadius} m.`),
+      supportSheetCell("D12", "3 or more = 100; 2 = 80; 0 to 1 = 0"),
+      supportSheetCell("E12", source),
+    ], 42),
+    supportSheetRow(14, [supportSheetCell("A14", "Map setting"), supportSheetCell("B14", "Captured value")], 24),
+    supportSheetRow(15, [supportSheetCell("A15", "Location area"), supportSheetCell("B15", data?.project?.locationArea || "")]),
+    supportSheetRow(16, [supportSheetCell("A16", "District"), supportSheetCell("B16", data?.project?.district || "")]),
+    supportSheetRow(17, [supportSheetCell("A17", "Latitude"), supportSheetCell("B17", Number(assessment.latitude || 0))]),
+    supportSheetRow(18, [supportSheetCell("A18", "Longitude"), supportSheetCell("B18", Number(assessment.longitude || 0))]),
+    supportSheetRow(19, [supportSheetCell("A19", "POI radius (metres)"), supportSheetCell("B19", poiRadius)]),
+    supportSheetRow(20, [supportSheetCell("A20", "Road radius (metres)"), supportSheetCell("B20", roadRadius)]),
+    supportSheetRow(21, [supportSheetCell("A21", "Nearest mapped road"), supportSheetCell("B21", assessment.roadName || "")]),
+    supportSheetRow(22, [supportSheetCell("A22", "Road highway tag"), supportSheetCell("B22", assessment.roadHighway || "")]),
+    supportSheetRow(23, [supportSheetCell("A23", "Road distance (metres)"), supportSheetCell("B23", Number(assessment.roadDistanceM || 0))]),
+    supportSheetRow(24, [supportSheetCell("A24", "Mapped features returned"), supportSheetCell("B24", Number(assessment.sourceFeatureCount || 0))]),
+    supportSheetRow(25, [supportSheetCell("A25", "Map provider"), supportSheetCell("B25", source)]),
+    supportSheetRow(26, [supportSheetCell("A26", "Rule version"), supportSheetCell("B26", assessment.ruleVersion || "openstreetmap-overpass-v1")]),
+    supportSheetRow(27, [supportSheetCell("A27", "Assessment time (UTC)"), supportSheetCell("B27", assessment.checkedAt || "")]),
+  ];
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <dimension ref="A1:E27"/>
+  <sheetViews><sheetView showGridLines="0" workbookViewId="0"><selection activeCell="A1" sqref="A1"/></sheetView></sheetViews>
+  <sheetFormatPr defaultRowHeight="18"/>
+  <cols><col min="1" max="1" width="40" customWidth="1"/><col min="2" max="2" width="24" customWidth="1"/><col min="3" max="3" width="110" customWidth="1"/><col min="4" max="4" width="46" customWidth="1"/><col min="5" max="5" width="32" customWidth="1"/></cols>
+  <sheetData>${rows.join("")}</sheetData>
+  <mergeCells count="2"><mergeCell ref="A1:E1"/><mergeCell ref="A2:E2"/></mergeCells>
+  <pageMargins left="0.25" right="0.25" top="0.35" bottom="0.35" header="0.1" footer="0.1"/>
+</worksheet>`;
+}
+
+function existingOutletsWorksheetXml(data) {
+  const included = data?.project?.includeExistingOutlets === true;
+  const assessment = data?.locationAssessment || {};
+  const matches = included && Array.isArray(assessment.existingOutletMatches)
+    ? assessment.existingOutletMatches
+    : [];
+  const dashboardCount = included ? Number(data?.project?.existingOutlets || 0) : 0;
+  const rows = [
+    supportSheetRow(1, [supportSheetCell("A1", "Existing outlets within 1 KM")], 24),
+    supportSheetRow(2, [supportSheetCell("A2", "Selected location"), supportSheetCell("B2", data?.project?.locationArea || ""), supportSheetCell("D2", "District"), supportSheetCell("E2", data?.project?.district || "")], 22),
+    supportSheetRow(3, [supportSheetCell("A3", "Dashboard count within 1 KM"), supportSheetCell("B3", dashboardCount), supportSheetCell("D3", "Assessment radius (KM)"), supportSheetCell("E3", 1)], 22),
+    supportSheetRow(4, [supportSheetCell("A4", "Target coordinates"), supportSheetCell("B4", assessment.latitude && assessment.longitude ? `${Number(assessment.latitude).toFixed(7)}, ${Number(assessment.longitude).toFixed(7)}` : "Not mapped")], 22),
+    supportSheetRow(6, [
+      supportSheetCell("A6", "Outlet code"),
+      supportSheetCell("B6", "Outlet name"),
+      supportSheetCell("C6", "District"),
+      supportSheetCell("D6", "Distance (KM)"),
+      supportSheetCell("E6", "Latitude"),
+      supportSheetCell("F6", "Longitude"),
+    ], 26),
+    ...matches.map((outlet, index) => {
+      const rowNumber = index + 7;
+      return supportSheetRow(rowNumber, [
+        supportSheetCell(`A${rowNumber}`, outlet.code || ""),
+        supportSheetCell(`B${rowNumber}`, outlet.name || ""),
+        supportSheetCell(`C${rowNumber}`, outlet.district || data?.project?.district || ""),
+        supportSheetCell(`D${rowNumber}`, Number(Number(outlet.distanceKm || 0).toFixed(3))),
+        supportSheetCell(`E${rowNumber}`, Number(outlet.lat || 0)),
+        supportSheetCell(`F${rowNumber}`, Number(outlet.lon || 0)),
+      ]);
+    }),
+  ];
+  const lastRow = Math.max(7, matches.length + 6);
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <dimension ref="A1:F${lastRow}"/>
+  <sheetViews><sheetView showGridLines="0" workbookViewId="0"><pane ySplit="6" topLeftCell="A7" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A7" sqref="A7"/></sheetView></sheetViews>
+  <sheetFormatPr defaultRowHeight="18"/>
+  <cols><col min="1" max="1" width="32" customWidth="1"/><col min="2" max="2" width="45" customWidth="1"/><col min="3" max="3" width="20" customWidth="1"/><col min="4" max="4" width="28" customWidth="1"/><col min="5" max="6" width="17" customWidth="1"/></cols>
+  <sheetData>${rows.join("")}</sheetData>
+  <mergeCells count="1"><mergeCell ref="A1:F1"/></mergeCells>
+  <autoFilter ref="A6:F${lastRow}"/>
+  <pageMargins left="0.25" right="0.25" top="0.35" bottom="0.35" header="0.1" footer="0.1"/>
+</worksheet>`;
+}
+
+function ensureWorksheetPart(zip, sheetName, sheetXml, hidden = false) {
+  const current = worksheetPaths(zip);
+  const currentPath = current.paths.get(sheetName);
+  if (currentPath) {
+    upsertZipEntry(zip, currentPath, new TextEncoder().encode(sheetXml));
+    return currentPath;
+  }
+
+  const workbookEntry = zipEntry(zip, "xl/workbook.xml");
+  const relationshipsEntry = zipEntry(zip, "xl/_rels/workbook.xml.rels");
+  const contentTypesEntry = zipEntry(zip, "[Content_Types].xml");
+  if (!workbookEntry || !relationshipsEntry || !contentTypesEntry) {
+    throw new Error("The master workbook is missing metadata required for dashboard-linked sheets.");
+  }
+
+  let workbookXml = readXmlContent(workbookEntry);
+  let relationshipsXml = readXmlContent(relationshipsEntry);
+  let contentTypesXml = readXmlContent(contentTypesEntry);
+  const usedSheetIds = [...workbookXml.matchAll(/<sheet\b[^>]*\bsheetId="(\d+)"[^>]*\/>/gi)]
+    .map((match) => Number(match[1]));
+  const usedRelationshipIds = [...relationshipsXml.matchAll(/\bId="rId(\d+)"/gi)]
+    .map((match) => Number(match[1]));
+  const usedSheetFiles = packageEntryPaths(zip)
+    .map((path) => path.match(/^xl\/worksheets\/sheet(\d+)\.xml$/i)?.[1])
+    .filter(Boolean)
+    .map(Number);
+  const sheetId = Math.max(0, ...usedSheetIds) + 1;
+  const relationshipNumber = Math.max(0, ...usedRelationshipIds) + 1;
+  const sheetFileNumber = Math.max(0, ...usedSheetFiles) + 1;
+  const relationshipId = `rId${relationshipNumber}`;
+  const sheetPath = `xl/worksheets/sheet${sheetFileNumber}.xml`;
+  const stateAttribute = hidden ? ' state="hidden"' : "";
+
+  workbookXml = workbookXml.replace(
+    /<\/sheets>/i,
+    `<sheet name="${encodeXmlAttribute(sheetName)}" sheetId="${sheetId}"${stateAttribute} r:id="${relationshipId}"/></sheets>`,
+  );
+  relationshipsXml = relationshipsXml.replace(
+    /<\/Relationships>/i,
+    `<Relationship Id="${relationshipId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${sheetFileNumber}.xml"/></Relationships>`,
+  );
+  contentTypesXml = contentTypesXml.replace(
+    /<\/Types>/i,
+    `<Override PartName="/${sheetPath}" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`,
+  );
+
+  writeXmlContent(workbookEntry, workbookXml);
+  writeXmlContent(relationshipsEntry, relationshipsXml);
+  writeXmlContent(contentTypesEntry, contentTypesXml);
+  upsertZipEntry(zip, sheetPath, new TextEncoder().encode(sheetXml));
+  return sheetPath;
+}
+
+function upsertDashboardSupportSheets(zip, data) {
+  ensureWorksheetPart(zip, DASHBOARD_RULES_SHEET_NAME, dashboardRulesWorksheetXml(data), true);
+  ensureWorksheetPart(zip, EXISTING_OUTLETS_SHEET_NAME, existingOutletsWorksheetXml(data), data?.project?.includeExistingOutlets !== true);
 }
 
 function packageEntryPaths(zip) {
@@ -1967,6 +2200,7 @@ function buildDashboardFeasibilityPatch(data, model) {
 export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt, approvalSnapshotPng = null) {
   const cfbApi = getCfbApi();
   const zip = cfbApi.read(asUint8Array(templateBuffer), { type: "array" });
+  upsertDashboardSupportSheets(zip, data);
   const { paths, workbookEntry, workbookXml } = worksheetPaths(zip);
   const requiredSheets = [
     "Master",
@@ -1996,13 +2230,16 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     C14: Number(data?.project?.outboundTransport || 0),
     C15: data?.project?.salesGivenBy ?? "",
     C16: data?.project?.openedBy ?? "",
-    C18: Number(data?.project?.existingOutlets || 0),
   };
   patchWorksheetValues(zip, paths.get("Master"), masterValues);
   patchWorksheetFormulas(zip, paths.get("Master"), {
     C17: dashboardFormulaSpec(
       "VLOOKUP(C16,E8:F15,2,0)",
       data?.project?.openedDesignation ?? "",
+    ),
+    C18: dashboardFormulaSpec(
+      `'${EXISTING_OUTLETS_SHEET_NAME}'!$B$3`,
+      data?.project?.includeExistingOutlets === true ? Number(data?.project?.existingOutlets || 0) : 0,
     ),
   });
 
@@ -2034,7 +2271,18 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
       'IF(OR(LOWER(TRIM(C19))="dhaka",SUBSTITUTE(LOWER(TRIM(C19))," ","")="dhakagbud"),"Dhaka","Out of Dhaka")',
       model?.dhakaClassification ?? "Dhaka",
     ),
-    C31: dashboardFormulaSpec("Master!C18", Number(data?.project?.existingOutlets || 0)),
+    C31: dashboardFormulaSpec(
+      `'${EXISTING_OUTLETS_SHEET_NAME}'!$B$3`,
+      data?.project?.includeExistingOutlets === true ? Number(data?.project?.existingOutlets || 0) : 0,
+    ),
+    F8: dashboardFormulaSpec(`'${DASHBOARD_RULES_SHEET_NAME}'!$B$5`, data?.forecast?.roadStatus ?? ""),
+    F9: dashboardFormulaSpec(`'${DASHBOARD_RULES_SHEET_NAME}'!$B$6`, Number(data?.forecast?.worshipCount || 0)),
+    F10: dashboardFormulaSpec(`'${DASHBOARD_RULES_SHEET_NAME}'!$B$7`, Number(data?.forecast?.educationCount || 0)),
+    F11: dashboardFormulaSpec(`'${DASHBOARD_RULES_SHEET_NAME}'!$B$8`, Number(data?.forecast?.bankOfficeCount || 0)),
+    F12: dashboardFormulaSpec(`'${DASHBOARD_RULES_SHEET_NAME}'!$B$9`, data?.forecast?.publicTransit ?? ""),
+    F13: dashboardFormulaSpec(`'${DASHBOARD_RULES_SHEET_NAME}'!$B$10`, Number(data?.project?.longFeet || 0)),
+    F14: dashboardFormulaSpec(`'${DASHBOARD_RULES_SHEET_NAME}'!$B$11`, data?.forecast?.signboardVisibility ?? ""),
+    F15: dashboardFormulaSpec(`'${DASHBOARD_RULES_SHEET_NAME}'!$B$12`, Number(data?.forecast?.hotelRestaurantHospitalCount || 0)),
   });
 
   const forecastFormulaCaches = {
@@ -2049,7 +2297,9 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     C26: Number(data?.reference?.referenceProfit || 0),
     C29: Number(model?.inputs?.dailySales || 0),
     C30: Number(model?.inputs?.dailyFootfall || 0),
-    C31: Number(data?.project?.existingOutlets || 0),
+    C31: data?.project?.includeExistingOutlets === true
+      ? Number(data?.project?.existingOutlets || 0)
+      : 0,
     H37: Number(model?.inputs?.dailySales || 0),
   };
 
@@ -2241,7 +2491,12 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
   writeXmlContent(
     workbookEntry,
     // MANPOWER is still used by INFORMATION formulas but stays hidden.
-    setWorkbookSheetVisibility(workbookWithPrintArea, REPORT_SHEET_NAMES),
+    setWorkbookSheetVisibility(
+      workbookWithPrintArea,
+      data?.project?.includeExistingOutlets === true
+        ? [...REPORT_SHEET_NAMES, EXISTING_OUTLETS_SHEET_NAME]
+        : REPORT_SHEET_NAMES,
+    ),
   );
 
   // Keep the template calculation chain, but synchronize its formula-cell

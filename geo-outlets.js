@@ -1,5 +1,19 @@
 const BANGLADESH_BOUNDS = Object.freeze({ minLat: 20, maxLat: 27, minLon: 88, maxLon: 93 });
 
+export const LOCATION_ASSESSMENT_RULES = Object.freeze({
+  version: "openstreetmap-overpass-v1",
+  poiRadiusM: 1000,
+  roadRadiusM: 150,
+  provider: "OpenStreetMap / Overpass",
+  mainRoadHighways: Object.freeze(["motorway", "trunk", "primary", "secondary", "tertiary"]),
+  supportRoadHighways: Object.freeze(["unclassified", "residential", "service", "living_street", "road"]),
+});
+
+const OVERPASS_ENDPOINTS = Object.freeze([
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+]);
+
 function validCoordinate(lat, lon) {
   return Number.isFinite(lat)
     && Number.isFinite(lon)
@@ -119,6 +133,191 @@ async function fetchWithTimeout(fetchImpl, endpoint, options = {}, timeoutMs = 7
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function normalizedTag(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function featureCoordinate(element) {
+  const lat = Number(element?.lat ?? element?.center?.lat);
+  const lon = Number(element?.lon ?? element?.center?.lon);
+  return validCoordinate(lat, lon) ? { lat, lon } : null;
+}
+
+function normalizedFeatureName(element) {
+  return normalizedTag(element?.tags?.name)
+    .replace(/[^a-z0-9\u0980-\u09ff]+/g, "")
+    .slice(0, 120);
+}
+
+function distinctFeatureCount(elements, category, predicate) {
+  const keys = new Set();
+  (elements || []).forEach((element) => {
+    if (!predicate(element?.tags || {})) return;
+    const coordinate = featureCoordinate(element);
+    const name = normalizedFeatureName(element);
+    const roundedCoordinate = coordinate
+      ? `${coordinate.lat.toFixed(4)},${coordinate.lon.toFixed(4)}`
+      : "no-coordinate";
+    // Named node/way duplicates at the same mapped point represent one place.
+    // Unnamed features retain their OSM identity so separate facilities count.
+    const key = name
+      ? `${category}:name:${name}:${roundedCoordinate}`
+      : `${category}:${element?.type || "feature"}:${element?.id ?? keys.size}`;
+    keys.add(key);
+  });
+  return keys.size;
+}
+
+function roadBaseType(value) {
+  return normalizedTag(value).replace(/_link$/, "");
+}
+
+function isDrivableRoad(tags) {
+  const highway = roadBaseType(tags?.highway);
+  return LOCATION_ASSESSMENT_RULES.mainRoadHighways.includes(highway)
+    || LOCATION_ASSESSMENT_RULES.supportRoadHighways.includes(highway);
+}
+
+function classifyRoad(elements, target) {
+  const roads = (elements || [])
+    .filter((element) => isDrivableRoad(element?.tags || {}))
+    .map((element) => {
+      const coordinate = featureCoordinate(element);
+      if (!coordinate) return null;
+      return {
+        element,
+        coordinate,
+        distanceKm: haversineKm(target, coordinate),
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.distanceKm - right.distanceKm);
+  const nearest = roads[0];
+  if (!nearest) {
+    return {
+      status: "B",
+      highway: "",
+      name: "",
+      distanceM: null,
+    };
+  }
+  const highway = roadBaseType(nearest.element.tags.highway);
+  return {
+    status: LOCATION_ASSESSMENT_RULES.mainRoadHighways.includes(highway) ? "M" : "S",
+    highway,
+    name: String(nearest.element.tags.name || "").trim(),
+    distanceM: Math.round(nearest.distanceKm * 1000),
+  };
+}
+
+function buildOverpassQuery(target) {
+  const lat = Number(target.lat).toFixed(7);
+  const lon = Number(target.lon).toFixed(7);
+  const roadRadius = LOCATION_ASSESSMENT_RULES.roadRadiusM;
+  const poiRadius = LOCATION_ASSESSMENT_RULES.poiRadiusM;
+  return `[out:json][timeout:18];
+(
+  way(around:${roadRadius},${lat},${lon})["highway"];
+  nwr(around:${poiRadius},${lat},${lon})["amenity"~"^(place_of_worship|school|college|university|bank|atm|bus_station|taxi|restaurant|hospital)$"];
+  nwr(around:${poiRadius},${lat},${lon})["building"~"^(mosque|temple|church)$"];
+  nwr(around:${poiRadius},${lat},${lon})["office"];
+  nwr(around:${poiRadius},${lat},${lon})["tourism"="hotel"];
+  nwr(around:${poiRadius},${lat},${lon})["club"];
+  nwr(around:${poiRadius},${lat},${lon})["public_transport"];
+  nwr(around:${poiRadius},${lat},${lon})["highway"="bus_stop"];
+  nwr(around:${poiRadius},${lat},${lon})["railway"~"^(station|halt|tram_stop)$"];
+  nwr(around:${poiRadius},${lat},${lon})["fuel:cng"="yes"];
+);
+out tags center;`;
+}
+
+async function fetchOverpassElements(target, fetchImpl) {
+  const body = new URLSearchParams({ data: buildOverpassQuery(target) }).toString();
+  let lastError = null;
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    try {
+      const response = await fetchWithTimeout(fetchImpl, endpoint, {
+        method: "POST",
+        headers: {
+          "Accept-Language": "en",
+          "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+        },
+        body,
+      }, 20000);
+      if (!response.ok) {
+        lastError = new Error(`Map service returned ${response.status}.`);
+        continue;
+      }
+      const payload = await response.json();
+      if (!Array.isArray(payload?.elements)) {
+        lastError = new Error("Map service returned an invalid result.");
+        continue;
+      }
+      return payload.elements;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(`Nearby map assessment is unavailable${lastError?.message ? `: ${lastError.message}` : "."}`);
+}
+
+export function classifyLocationEnvironment(elements, target) {
+  if (!target || !validCoordinate(Number(target.lat), Number(target.lon))) {
+    throw new Error("A valid mapped location is required for the nearby assessment.");
+  }
+  const road = classifyRoad(elements, target);
+  const worshipCount = distinctFeatureCount(elements, "worship", (tags) => (
+    normalizedTag(tags.amenity) === "place_of_worship"
+    || ["mosque", "temple", "church"].includes(normalizedTag(tags.building))
+  ));
+  const educationCount = distinctFeatureCount(elements, "education", (tags) => (
+    ["school", "college", "university"].includes(normalizedTag(tags.amenity))
+  ));
+  const bankOfficeCount = distinctFeatureCount(elements, "bank-office", (tags) => (
+    ["bank", "atm"].includes(normalizedTag(tags.amenity))
+    || (Boolean(tags.office) && !["no", "none"].includes(normalizedTag(tags.office)))
+  ));
+  const transitCount = distinctFeatureCount(elements, "transit", (tags) => (
+    ["bus_station", "taxi"].includes(normalizedTag(tags.amenity))
+    || normalizedTag(tags.highway) === "bus_stop"
+    || Boolean(tags.public_transport)
+    || ["station", "halt", "tram_stop"].includes(normalizedTag(tags.railway))
+    || normalizedTag(tags["fuel:cng"]) === "yes"
+  ));
+  const hotelRestaurantHospitalCount = distinctFeatureCount(elements, "commercial-anchor", (tags) => (
+    normalizedTag(tags.tourism) === "hotel"
+    || ["restaurant", "hospital"].includes(normalizedTag(tags.amenity))
+    || (Boolean(tags.club) && !["no", "none"].includes(normalizedTag(tags.club)))
+  ));
+
+  return {
+    ruleVersion: LOCATION_ASSESSMENT_RULES.version,
+    provider: LOCATION_ASSESSMENT_RULES.provider,
+    checkedAt: new Date().toISOString(),
+    latitude: Number(target.lat),
+    longitude: Number(target.lon),
+    poiRadiusM: LOCATION_ASSESSMENT_RULES.poiRadiusM,
+    roadRadiusM: LOCATION_ASSESSMENT_RULES.roadRadiusM,
+    sourceFeatureCount: Array.isArray(elements) ? elements.length : 0,
+    roadStatus: road.status,
+    roadHighway: road.highway,
+    roadName: road.name,
+    roadDistanceM: road.distanceM,
+    worshipCount,
+    educationCount,
+    bankOfficeCount,
+    publicTransit: transitCount > 0 ? "Y" : "N",
+    publicTransitCount: transitCount,
+    signboardVisibility: road.status === "M" ? "H" : road.status === "S" ? "M" : "L",
+    hotelRestaurantHospitalCount,
+  };
+}
+
+export async function assessLocationEnvironment(target, fetchImpl = fetch) {
+  const elements = await fetchOverpassElements(target, fetchImpl);
+  return classifyLocationEnvironment(elements, target);
 }
 
 async function geocodeWithNominatim(query, district, fetchImpl) {
