@@ -13,9 +13,10 @@ import {
   getSignatoryAutoLink,
   openedByOptions,
   salesGivenByOptions,
-} from "./model.mjs?v=feasibility-optional-existing-outlets-v16";
-import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-optional-existing-outlets-v16";
-import { downloadFeasibilityPdf, downloadManagementFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-optional-existing-outlets-v16";
+} from "./model.mjs?v=feasibility-edited-rules-zone-count-v17";
+import { geocodeLocationArea, loadOutletLocations, outletsWithinRadius } from "./geo-outlets.js?v=feasibility-edited-rules-zone-count-v17";
+import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-edited-rules-zone-count-v17";
+import { downloadFeasibilityPdf, downloadManagementFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-edited-rules-zone-count-v17";
 
 const app = document.querySelector("#app");
 const workbookInput = document.querySelector("#workbook-file");
@@ -29,7 +30,12 @@ const state = {
   rulesWorkbook: { buffer: null, sourceName: "source-workbook.xlsx" },
   status: { kind: "loading", message: "Loading the workbook baseline…" },
   firstFeasibilityEntry: null,
+  outletLocations: [],
+  outletLocationMeta: {},
+  locationLookup: { kind: "loading", message: "Loading the zone outlet map…" },
 };
+
+let locationLookupToken = 0;
 
 const blankInitialSelectionPaths = Object.freeze([
   "project.locationArea",
@@ -42,7 +48,6 @@ const blankInitialSelectionPaths = Object.freeze([
   "project.locationType",
   "project.salesGivenBy",
   "project.openedBy",
-  "forecast.marketNearby",
   "forecast.roadStatus",
   "forecast.publicTransit",
   "forecast.signboardVisibility",
@@ -177,6 +182,49 @@ function recalculate() {
   // user has edited the table by hand (which switches it to manual).
   applyAutoManpower(state.data);
   state.model = calculateModel(state.data);
+}
+
+function locationLookupMessage(kind, message) {
+  state.locationLookup = { kind, message };
+}
+
+async function refreshExistingOutletCount() {
+  const token = ++locationLookupToken;
+  if (state.data.project.includeExistingOutlets !== true) {
+    locationLookupMessage("off", "Automatic 1 KM outlet count is currently excluded from exports.");
+    render();
+    return;
+  }
+  if (!state.data.project.locationArea || !state.data.project.district) {
+    locationLookupMessage("waiting", "Enter a complete location address and select District to calculate the 1 KM count.");
+    render();
+    return;
+  }
+  if (!state.outletLocations.length) {
+    locationLookupMessage("warning", "The zone outlet map is unavailable; the number remains editable manually.");
+    render();
+    return;
+  }
+
+  locationLookupMessage("loading", "Checking the address against outlet map points in the selected district…");
+  render();
+  try {
+    const target = await geocodeLocationArea(state.data.project.locationArea, state.data.project.district);
+    if (token !== locationLookupToken) return;
+    const matches = outletsWithinRadius(state.outletLocations, target, state.data.project.district, 1);
+    state.data.project.existingOutlets = matches.length;
+    recalculate();
+    const mappedInDistrict = state.outletLocations.filter((outlet) => outlet.district === state.data.project.district).length;
+    locationLookupMessage(
+      "ready",
+      `${matches.length} existing outlet${matches.length === 1 ? "" : "s"} found within 1 KM. Checked ${mappedInDistrict} mapped outlet${mappedInDistrict === 1 ? "" : "s"} in ${state.data.project.district}.`,
+    );
+    state.status = { kind: "ready", message: `Existing Outlet No. within 1 KM updated automatically to ${matches.length}.` };
+  } catch (error) {
+    if (token !== locationLookupToken) return;
+    locationLookupMessage("warning", `${error.message} The number remains editable manually.`);
+  }
+  render();
 }
 
 function statusHtml() {
@@ -354,6 +402,15 @@ function optionalExportNumberField(label, valuePath, includePath, options = {}) 
   return `<div class="field optional-export-field ${included ? "optional-export-on" : "optional-export-off"}"><span><label for="${escapeHtml(inputId)}">${escapeHtml(label)}</label><label class="optional-export-toggle"><input data-path="${escapeHtml(includePath)}" type="checkbox" ${included ? "checked" : ""}><span>Include in Excel &amp; PDFs</span></label></span><input id="${escapeHtml(inputId)}" data-path="${escapeHtml(valuePath)}" type="number" value="${escapeHtml(valueForInput(value))}" ${attributes}></div>`;
 }
 
+function existingOutletLookupHtml() {
+  const lookup = state.locationLookup || {};
+  const mappedCount = Number(state.outletLocationMeta?.mappedCount || state.outletLocations.length || 0);
+  const suffix = mappedCount > 0 && lookup.kind !== "ready"
+    ? ` Zone dashboard reference: ${formatMoney(mappedCount, 0)} mapped outlets.`
+    : "";
+  return `<p class="location-lookup-note location-lookup-${escapeHtml(lookup.kind || "waiting")}">${escapeHtml(lookup.message || "Enter a location and select District to calculate the 1 KM count.")}${escapeHtml(suffix)}</p>`;
+}
+
 function automaticField(label, value, hint = "") {
   return `<label class="field field-automatic"><span>${escapeHtml(label)}${hint ? `<em>${escapeHtml(hint)}</em>` : ""}</span><output>${escapeHtml(value)}</output></label>`;
 }
@@ -480,6 +537,7 @@ function renderDataEntry() {
           ${textField("Advance", "project.advance", { type: "number", min: 0, step: 1 })}
           ${textField("Outbound Transport / Month", "project.outboundTransport", { type: "number", min: 0, step: 1, hint: outboundTransportHint() })}
           ${optionalExportNumberField("Existing Outlet No. within 1 KM", "project.existingOutlets", "project.includeExistingOutlets", { min: 0, step: 1 })}
+          ${existingOutletLookupHtml()}
         </div>`)}
         ${sectionCard("GP controls", "Enter a whole percentage: 16 means 16%. You may also use the prior decimal style, such as 0.16. Leave either manual field blank to retain the automatic calculation.", `<div class="override-grid">
           <div class="override-box"><div><span>GP%</span>${autoBadge(model.modes.gpPercent === "Manual")}</div>${textField("Manual GP%", "project.gpPercentOverride", { type: "number", min: 0, max: 100, step: 0.01, optional: true, percentPoints: true, hint: `Auto: ${formatPercent(model.inputs.gpPercent, 2)} · Enter 16 or 0.16 for 16%` })}<button class="text-button" type="button" data-action="clear-override" data-path="project.gpPercentOverride">Use automatic GP%</button></div>
@@ -491,13 +549,11 @@ function renderDataEntry() {
           ${textField("Opened by Designation", "project.openedDesignation", { placeholder: "Type the designation" })}
         </div>`)}
         ${sectionCard("Sales forecasting assessment", "The score, weightage and forecast classification update automatically.", `<div class="field-grid two">
-          ${selectField("Market / Bazar position", "forecast.marketNearby", ["Within Bazar", "Near Bazar"])}
-          ${textField("Average Sales of Departmental Stores", "forecast.avgDepartmentalSales", { type: "number", min: 0, step: 1 })}
+          ${textField("Avg. Sales of Departmental Stores / Competitor Store", "forecast.avgDepartmentalSales", { type: "number", min: 0, step: 1 })}
           ${selectField("Road Status", "forecast.roadStatus", ["M", "S", "B"])}
           ${textField("Mosque / Mandir / Girza", "forecast.worshipCount", { type: "number", min: 0, step: 1 })}
           ${textField("School / College / University", "forecast.educationCount", { type: "number", min: 0, step: 1 })}
           ${textField("Bank / Office / ATM Booth", "forecast.bankOfficeCount", { type: "number", min: 0, step: 1 })}
-          ${textField("Competitor average sales", "forecast.competitorAvgSales", { type: "number", min: 0, step: 1 })}
           ${selectField("CNG / Bus / Train / Pick & Drop", "forecast.publicTransit", ["Y", "N"])}
           ${selectField("Signboard Visibility", "forecast.signboardVisibility", ["H", "M", "L"])}
           ${textField("Hotel / Restaurant / Hospital / Club", "forecast.hotelRestaurantHospitalCount", { type: "number", min: 0, step: 1 })}
@@ -526,13 +582,16 @@ function renderDataEntry() {
           ${textField("Sales growth Y4", "advanced.salesGrowthYear4", { type: "number", min: -1, max: 2, step: 0.0001 })}
           ${textField("Sales growth Y5", "advanced.salesGrowthYear5", { type: "number", min: -1, max: 2, step: 0.0001 })}
           ${textField("Stock write-off %", "advanced.stockWriteOffRate", { type: "number", min: 0, max: 1, step: 0.0001 })}
-          ${textField("Product wastage %", "advanced.productWastageRate", { type: "number", min: 0, max: 1, step: 0.0001 })}
+          ${textField("Product wastage P&P % (Month 2 onward)", "advanced.productWastageRate", { type: "number", min: 0, max: 1, step: 0.0001 })}
+          ${textField("Product wastage P&P % (Month 1)", "advanced.productWastageFirstMonthPnpRate", { type: "number", min: 0, max: 1, step: 0.0001 })}
+          ${textField("Product wastage Non-P&P % (Month 1)", "advanced.productWastageFirstMonthNonPnpRate", { type: "number", min: 0, max: 1, step: 0.0001 })}
         </div></details>
         <details><summary>Outlet operating cost</summary><div class="field-grid three">
           ${textField("Initial outlet OPEX", "advanced.outletOpexInitial", { type: "number", min: 0, step: 1 })}
           ${textField("Recurring outlet OPEX / month", "advanced.outletOpexRecurringMonthly", { type: "number", min: 0, step: 1 })}
           ${textField("Outlet OPEX escalation", "advanced.outletOpexEscalation", { type: "number", min: 0, max: 1, step: 0.0001 })}
-          ${textField("Consumption / consumable %", "advanced.consumptionRate", { type: "number", min: 0, max: 1, step: 0.0001 })}
+          ${textField("Consumption / consumable % (Non-P&P)", "advanced.consumptionRate", { type: "number", min: 0, max: 1, step: 0.0001 })}
+          ${textField("Consumption / consumable % (P&P)", "advanced.consumptionRatePnp", { type: "number", min: 0, max: 1, step: 0.0001 })}
           ${textField("Electricity / month", "advanced.electricityMonthly", { type: "number", min: 0, step: 1 })}
           ${textField("Maintenance / month", "advanced.maintenanceMonthly", { type: "number", min: 0, step: 1 })}
           ${textField("Security cost / month", "advanced.securityCostMonthly", { type: "number", min: 0, step: 1 })}
@@ -587,7 +646,7 @@ function renderForecast() {
 function renderInformation() {
   const { data, model } = state;
   const primary = [
-    ["Project name", data.project.locationArea], ["SFT", `${formatMoney(data.project.sft, 0)} SFT`], ["GP Share", formatPercent(model.inputs.gpShare, 1)], ["Sales per day", `৳ ${formatMoney(model.inputs.dailySales)}`], ["Month sales", `৳ ${formatMoney(model.inputs.monthlySales)}`], ["GP%", formatPercent(model.inputs.gpPercent, 2)], ["Basket size", formatMoney(model.inputs.basketSize, 1)], ["FF / Day", formatMoney(model.inputs.dailyFootfall, 1)], ["Other income", formatPercent(data.information.otherIncomeRate, 1)], ["P&P", data.project.pnp], ["Monthly rent", `৳ ${formatMoney(data.project.monthlyRent)}`], ["Advance", `৳ ${formatMoney(data.project.advance)}`], ["CEP value", `৳ ${formatMoney(model.inputs.cepValue)}`], ["Area out of Dhaka", `${model.dhakaClassification} (${model.inputs.areaOutsideDhaka})`], ["Decoration cost", `৳ ${formatMoney(data.information.decorationCost)}`],
+    ["Project name", data.project.locationArea], ["SFT", `${formatMoney(data.project.sft, 0)} SFT`], ["GP Share", formatPercent(model.inputs.gpShare, 1)], ["Sales per day", `৳ ${formatMoney(model.inputs.dailySales)}`], ["Month sales", `৳ ${formatMoney(model.inputs.monthlySales)}`], ["GP%", formatPercent(model.inputs.gpPercent, 2)], ["Basket size", formatMoney(model.inputs.basketSize, 1)], ["FF / Day", formatMoney(model.inputs.dailyFootfall, 1)], ["Other income", formatPercent(data.information.otherIncomeRate, 1)], ["P&P", data.project.pnp], ["Monthly rent", `৳ ${formatMoney(data.project.monthlyRent)}`], ["Advance", `৳ ${formatMoney(data.project.advance)}`], ["CEP value", `৳ ${formatMoney(model.inputs.cepValue)}`], ["Area out of Dhaka", `${model.dhakaClassification} (${model.inputs.areaOutsideDhaka})`], ["Decoration cost", `৳ ${formatMoney(model.inputs.decorationCost)}`],
   ];
   return `<section class="page"><div class="page-title-row"><div><p class="eyebrow">Information sheet</p><h2>Business feasibility information</h2><p class="page-subtitle">Project terms and manpower allocation.</p></div><button class="btn btn-secondary" type="button" data-view="entry">Edit information inputs</button></div><div class="split-report"><article class="panel"><div class="panel-heading"><div><p class="eyebrow">Project parameters</p><h3>Commercial terms</h3></div></div><dl class="information-list">${primary.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl></article><article class="panel"><div class="panel-heading"><div><p class="eyebrow">Manpower allocation</p><h3>Monthly people cost</h3></div></div><div class="table-scroll"><table class="report-table"><thead><tr><th>Position</th><th>Qty</th><th>Salary</th><th>Total</th></tr></thead><tbody>${data.staff.map((staff) => `<tr><td>${escapeHtml(staff.name)}</td><td>${formatMoney(staff.quantity, 0)}</td><td>৳ ${formatMoney(staff.salary)}</td><td>৳ ${formatMoney(Number(staff.quantity) * Number(staff.salary))}</td></tr>`).join("")}<tr class="total-row"><td>Total</td><td>${formatMoney(data.staff.reduce((sum, staff) => sum + Number(staff.quantity), 0), 0)}</td><td></td><td>৳ ${formatMoney(data.staff.reduce((sum, staff) => sum + Number(staff.quantity) * Number(staff.salary), 0))}</td></tr></tbody></table></div></article></div></section>`;
 }
@@ -885,6 +944,7 @@ function applyDistrictSelection(target) {
     ? { kind: "ready", message: `${selected.district} selected. Division updated to ${selected.division}. Outbound Transport / Month set to ৳ ${formatMoney(state.data.project.outboundTransport)}; you can change it manually.` }
     : { kind: "ready", message: "District selection cleared." };
   render();
+  void refreshExistingOutletCount();
 }
 
 function applyChange(target) {
@@ -938,6 +998,9 @@ function applyChange(target) {
     }
     : { kind: "ready", message: "Inputs updated. All report values refreshed." };
   render();
+  if (path === "project.locationArea" || path === "project.includeExistingOutlets") {
+    void refreshExistingOutletCount();
+  }
 }
 
 function setSignatoryMode(index, useManualOverride) {
@@ -1003,6 +1066,22 @@ async function loadSignManifest() {
     }));
   } catch {
     state.signatureAssets = [];
+  }
+}
+
+async function loadZoneOutletMap() {
+  try {
+    const result = await loadOutletLocations();
+    state.outletLocations = result.outlets;
+    state.outletLocationMeta = result.meta;
+    locationLookupMessage(
+      "waiting",
+      "Enter a complete location address and select District to calculate the 1 KM count.",
+    );
+  } catch (error) {
+    state.outletLocations = [];
+    state.outletLocationMeta = {};
+    locationLookupMessage("warning", `${error.message} The number remains editable manually.`);
   }
 }
 
@@ -1174,6 +1253,7 @@ app.addEventListener("click", (event) => {
   if (actionName === "reset") {
     state.data = cloneData(defaultData);
     state.firstFeasibilityEntry = null;
+    locationLookupMessage("waiting", "Enter a complete location address and select District to calculate the 1 KM count.");
     recalculate();
     state.status = { kind: "ready", message: "Built-in baseline restored." };
     render();
@@ -1235,7 +1315,7 @@ signatureInput.addEventListener("change", () => {
 async function initialise() {
   installRuntimeStyles();
   render();
-  await Promise.all([loadSignManifest(), loadConfiguredSource()]);
+  await Promise.all([loadSignManifest(), loadConfiguredSource(), loadZoneOutletMap()]);
   render();
 }
 

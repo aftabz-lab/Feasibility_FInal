@@ -262,17 +262,15 @@ async function drawForecastPage(doc, data, model, assets, exportedAt, options = 
   const measuringTools = [
     "High / Medium / Low",
     "A / B / C",
-    "Commercial Hub",
-    "Within Bazar / Near Bazar",
+    data.project.locationType || "Location Type",
     "Avg. per Day Sales",
-    "Main Road / Support Road / Block",
+    "Main Road / Support Road",
     "How Many",
     "How Many",
     "How Many",
-    "Avg. per Day Sales",
     "Y / N",
     "Long-feet",
-    "High / Medium / Low",
+    "High / Medium",
     "How Many",
   ];
   const scoreRows = [
@@ -381,7 +379,7 @@ async function drawInformationPage(doc, data, model, assets, exportedAt, options
     ["Advance", formatMoney(data.project.advance), "input"],
     ["CEP Value", formatMoney(model.inputs.cepValue), "input"],
     ["Area Out of Dhaka", `${model.dhakaClassification} (${model.inputs.areaOutsideDhaka})`, "input"],
-    ["Decoration Cost", formatMoney(data.information.decorationCost), "input"],
+    ["Decoration Cost", formatMoney(model.inputs.decorationCost), "input"],
   ];
   const informationEnd = drawLabelValueTable(doc, margin, y, leftWidth, informationRows, {
     title: "PROJECT PARAMETERS",

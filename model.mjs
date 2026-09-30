@@ -369,7 +369,7 @@ export const defaultData = {
     openedBy: "",
     openedDesignation: "",
     existingOutlets: 0,
-    includeExistingOutlets: false,
+    includeExistingOutlets: true,
     gpPercentOverride: null,
     gpShareOverride: null,
   },
@@ -424,7 +424,10 @@ export const defaultData = {
     outletOpexRecurringMonthly: 5000,
     outletOpexEscalation: 0.05,
     consumptionRate: 0.0065,
+    consumptionRatePnp: 0.008,
     productWastageRate: 0.0058,
+    productWastageFirstMonthPnpRate: 0.0023,
+    productWastageFirstMonthNonPnpRate: 0.0006,
     electricityMonthly: 0,
     maintenanceMonthly: 0,
     securityCostMonthly: 0,
@@ -432,7 +435,7 @@ export const defaultData = {
     cleaningMonthly: 0,
     cityChargeDhakaMonthly: 4500,
     cityChargeOutsideDhakaMonthly: 6500,
-    membershipDiscountRate: 0.0038,
+    membershipDiscountRate: 0.0025,
     insuranceMonthly: 2500,
     promotionalMonthly: 0,
     iceMonthly: 0,
@@ -455,7 +458,7 @@ export const defaultData = {
     franchiseGeneratorMonthly: 2000,
     franchiseIceMonthly: 0,
     franchiseServiceMonthly: 0,
-    franchiseFinanceRate: 0.09,
+    franchiseFinanceRate: 0.14,
     franchiseDepreciationMonths: 120,
     rentEscalation: 0.1,
     rentEscalationStartsYear: 4,
@@ -664,42 +667,41 @@ function scoreForLocationType(value) {
     "Inside the Mall": 55,
     "High Street W Institutions": 75,
   };
-  return scores[value] ?? 70;
+  return scores[value] ?? 0;
 }
 
-function scoreForSales(value, lowScore = 20) {
+function scoreForSales(value) {
   const amount = number(value);
+  if (amount <= 0) return 0;
   if (amount >= 45000) return 100;
   if (amount >= 35000) return 80;
   if (amount >= 25000) return 60;
   if (amount >= 15000) return 40;
-  return lowScore;
+  return 20;
 }
 
 function scoreForCount(value) {
   const count = number(value);
   if (count >= 2) return 100;
   if (count === 1) return 80;
-  return 50;
+  return 0;
 }
 
 export function calculateForecastScore(data) {
   const { project, forecast } = data;
   const rows = [
-    { label: "Population Density / Residential Area", weight: 0.15, answer: project.density, mark: { H: 100, M: 70, L: 50 }[project.density] ?? 50 },
-    { label: "House Rent / Income Level", weight: 0.13, answer: project.incomeLevel, mark: { A: 100, B: 70, C: 50 }[project.incomeLevel] ?? 50 },
-    { label: "Location Type", weight: 0.15, answer: project.locationType, mark: scoreForLocationType(project.locationType) },
-    { label: "Market / Bazar / Shopping Mall / Other Brands", weight: 0.1, answer: forecast.marketNearby, mark: forecast.marketNearby === "Near Bazar" ? 70 : 100 },
-    { label: "Average Sales of Departmental Stores", weight: 0.07, answer: forecast.avgDepartmentalSales, mark: scoreForSales(forecast.avgDepartmentalSales, 20) },
-    { label: "Road Status", weight: 0.07, answer: forecast.roadStatus, mark: project.roadStatus === "M" || forecast.roadStatus === "M" ? 100 : 80 },
-    { label: "Mosque / Mandir / Girza", weight: 0.07, answer: forecast.worshipCount, mark: scoreForCount(forecast.worshipCount) },
-    { label: "School / College / University", weight: 0.06, answer: forecast.educationCount, mark: scoreForCount(forecast.educationCount) },
-    { label: "Bank / Office / ATM Booth", weight: 0.05, answer: forecast.bankOfficeCount, mark: scoreForCount(forecast.bankOfficeCount) },
-    { label: "Competitor Presence with Avg Sales", weight: 0.05, answer: forecast.competitorAvgSales, mark: scoreForSales(forecast.competitorAvgSales, 0) },
-    { label: "CNG, Bus, Train Station / Pick & Drop", weight: 0.03, answer: forecast.publicTransit, mark: yes(forecast.publicTransit) ? 100 : 50 },
-    { label: "Front Fascia", weight: 0.02, answer: project.longFeet, mark: number(project.longFeet) >= 20 ? 100 : 80 },
-    { label: "Signboard Visibility", weight: 0.03, answer: forecast.signboardVisibility, mark: { H: 100, M: 80, L: 60 }[forecast.signboardVisibility] ?? 60 },
-    { label: "Hotel / Restaurant / Hospital / Club", weight: 0.02, answer: forecast.hotelRestaurantHospitalCount, mark: number(forecast.hotelRestaurantHospitalCount) >= 3 ? 100 : number(forecast.hotelRestaurantHospitalCount) === 2 ? 80 : 50 },
+    { label: "Population Density / Residential Area", weight: 0.18, answer: project.density, mark: { H: 100, M: 70, L: 50 }[project.density] ?? 0 },
+    { label: "House Rent / Income Level", weight: 0.15, answer: project.incomeLevel, mark: { A: 100, B: 70, C: 50 }[project.incomeLevel] ?? 0 },
+    { label: "Location Type", weight: 0.18, answer: project.locationType, mark: scoreForLocationType(project.locationType) },
+    { label: "Avg. Sales of Departmental Stores / Competitor Store", weight: 0.08, answer: forecast.avgDepartmentalSales, mark: scoreForSales(forecast.avgDepartmentalSales) },
+    { label: "Road Status", weight: 0.08, answer: forecast.roadStatus, mark: forecast.roadStatus === "M" ? 100 : forecast.roadStatus === "S" ? 80 : 0 },
+    { label: "Mosque / Mandir / Girza", weight: 0.08, answer: forecast.worshipCount, mark: scoreForCount(forecast.worshipCount) },
+    { label: "School / College / University", weight: 0.07, answer: forecast.educationCount, mark: scoreForCount(forecast.educationCount) },
+    { label: "Bank / Office / ATM Booth", weight: 0.06, answer: forecast.bankOfficeCount, mark: scoreForCount(forecast.bankOfficeCount) },
+    { label: "CNG, Bus, Train Station / Pick & Drop", weight: 0.04, answer: forecast.publicTransit, mark: yes(forecast.publicTransit) ? 100 : 0 },
+    { label: "Front Fascia", weight: 0.02, answer: project.longFeet, mark: number(project.longFeet) <= 0 ? 0 : number(project.longFeet) >= 20 ? 100 : 80 },
+    { label: "Signboard Visibility", weight: 0.04, answer: forecast.signboardVisibility, mark: { H: 100, M: 80 }[forecast.signboardVisibility] ?? 0 },
+    { label: "Hotel / Restaurant / Hospital / Club", weight: 0.02, answer: forecast.hotelRestaurantHospitalCount, mark: number(forecast.hotelRestaurantHospitalCount) >= 3 ? 100 : number(forecast.hotelRestaurantHospitalCount) === 2 ? 80 : 0 },
   ];
   const total = sum(rows.map((row) => row.weight * row.mark));
   return { rows, total, max: 100 };
@@ -792,7 +794,7 @@ export function calculateModel(data) {
   const growth = [advanced.salesGrowthYear2, advanced.salesGrowthYear3, advanced.salesGrowthYear4, advanced.salesGrowthYear5];
 
   const sales = annualMonthly(monthlySales, growth);
-  const daySales = series(dailySales, dailySales, dailySales, safeDivide(sales[3], 365), safeDivide(sales[4], 365), safeDivide(sales[5], 365), safeDivide(sales[6], 365), safeDivide(sales[7], 365));
+  const daySales = series(dailySales, dailySales, dailySales, safeDivide(sales[3], 360), safeDivide(sales[4], 360), safeDivide(sales[5], 360), safeDivide(sales[6], 360), safeDivide(sales[7], 360));
   // Workbook G8 = G9/G7 then H8 = G8*1.04, so basket compounds off YEAR 1 - not
   // off the reference basket. Footfall is then sales / basket (H7 = H9/H8).
   const basketGrowthRate = 1 + number(advanced.basketGrowth);
@@ -832,9 +834,25 @@ export function calculateModel(data) {
   const staffSupport = annualStaff(groupedStaffCost("support"));
   const outletDepreciationMonthly = safeDivide(cepValue * number(advanced.outletDepreciablePortion), advanced.outletDepreciationMonths);
   const outletDepreciation = annualMonthly(outletDepreciationMonthly, [0, 0, 0, 0]);
-  const consumption = multiply(sales, Array(8).fill(number(advanced.consumptionRate)));
+  const consumptionRate = yes(project.pnp)
+    ? number(advanced.consumptionRatePnp, 0.008)
+    : number(advanced.consumptionRate, 0.0065);
+  const consumption = multiply(sales, Array(8).fill(consumptionRate));
   const utility = annualMonthly(advanced.electricityMonthly, [0, 0, 0, 0]);
-  const productWastage = yes(project.pnp) ? multiply(sales, Array(8).fill(number(advanced.productWastageRate))) : series();
+  // The edited workbook applies a separate first-month rule, then keeps the
+  // prior 0.58% P&P rule for months 2-3 and every annual period.
+  const productWastage = yes(project.pnp)
+    ? series(
+      sales[0] * number(advanced.productWastageFirstMonthPnpRate, 0.0023),
+      sales[1] * number(advanced.productWastageRate, 0.0058),
+      sales[2] * number(advanced.productWastageRate, 0.0058),
+      sales[3] * number(advanced.productWastageRate, 0.0058),
+      sales[4] * number(advanced.productWastageRate, 0.0058),
+      sales[5] * number(advanced.productWastageRate, 0.0058),
+      sales[6] * number(advanced.productWastageRate, 0.0058),
+      sales[7] * number(advanced.productWastageRate, 0.0058),
+    )
+    : series(sales[0] * number(advanced.productWastageFirstMonthNonPnpRate, 0.0006));
   const maintenance = annualMonthly(advanced.maintenanceMonthly, [0, 0, 0, 0]);
   const security = annualMonthly(advanced.securityCostMonthly, [0, 0, 0, 0]);
   const generator = annualMonthly(advanced.generatorMonthly, [0, 0, 0, 0]);
@@ -987,9 +1005,9 @@ export function calculateModel(data) {
     line("Outlet staff salary (Permanent)", staffPermanent),
     line("Outlet staff salary (Support team)", staffSupport),
     line("Depreciation", outletDepreciation),
-    line("Consumption-Consumable", consumption, { rate: advanced.consumptionRate }),
+    line("Consumption-Consumable", consumption, { rate: consumptionRate }),
     line("Electricity & Utility", utility),
-    line("Product Wastage", productWastage, { rate: yes(project.pnp) ? advanced.productWastageRate : 0 }),
+    line("Product Wastage", productWastage),
     line("Maintenance", maintenance),
     line("Security", security),
     line("Generator Running Expense", generator),
@@ -1203,36 +1221,38 @@ export function extractFromWorkbook(workbook, sourceName = "Imported workbook") 
   const forecastSheet = "Sales forecasting tools";
   const informationSheet = "INFORMATION";
   const get = (sheet, cell) => getCell(workbook, sheet, cell);
+  const editedLayout = String(get(forecastSheet, "B18") ?? "").trim() === "Enter Location Area";
   data.meta = { sourceName, sourceLoaded: true, loadedAt: new Date().toISOString() };
-  data.project.locationArea = String(get(forecastSheet, "C20") ?? get(informationSheet, "B4") ?? data.project.locationArea);
-  data.project.division = String(get(forecastSheet, "C21") ?? data.project.division);
-  data.project.pnp = String(get(forecastSheet, "C22") ?? get(informationSheet, "B14") ?? data.project.pnp).toUpperCase();
+  data.project.locationArea = String(get(forecastSheet, editedLayout ? "C18" : "C20") ?? get(informationSheet, "B4") ?? get(master, "C2") ?? data.project.locationArea);
+  data.project.division = String(get(forecastSheet, editedLayout ? "C19" : "C21") ?? (editedLayout ? get(master, "B9") : null) ?? data.project.division);
+  data.project.pnp = String(get(forecastSheet, editedLayout ? "C20" : "C22") ?? get(informationSheet, "B14") ?? get(master, "C3") ?? data.project.pnp).toUpperCase();
   data.project.sft = pickNumber(get(forecastSheet, "F3") ?? get(informationSheet, "B6"), data.project.sft);
   data.project.density = String(get(forecastSheet, "F4") ?? data.project.density).toUpperCase();
   data.project.incomeLevel = String(get(forecastSheet, "F5") ?? data.project.incomeLevel).toUpperCase();
   // The source forecasting template stores the entered Location Type in E6;
   // older copies used F6, so retain that as a compatibility fallback.
   data.project.locationType = String(get(forecastSheet, "E6") ?? get(forecastSheet, "F6") ?? data.project.locationType);
-  data.project.longFeet = pickNumber(get(forecastSheet, "F15"), data.project.longFeet);
-  data.project.projectedDailySales = pickNumber(get(informationSheet, "B8") ?? get(forecastSheet, "C31"), data.project.projectedDailySales);
-  data.project.monthlyRent = pickNumber(get(informationSheet, "B15") ?? get(master, "C10"), data.project.monthlyRent);
-  data.project.advance = pickNumber(get(informationSheet, "B16") ?? get(master, "C11"), data.project.advance);
-  data.project.outboundTransport = pickNumber(get(master, "C26"), data.project.outboundTransport);
+  data.project.longFeet = pickNumber(get(forecastSheet, editedLayout ? "F13" : "F15"), data.project.longFeet);
+  data.project.projectedDailySales = pickNumber(get(informationSheet, "B8") ?? get(forecastSheet, editedLayout ? "C29" : "C31"), data.project.projectedDailySales);
+  data.project.monthlyRent = pickNumber(get(informationSheet, "B15") ?? get(master, editedLayout ? "C12" : "C10"), data.project.monthlyRent);
+  data.project.advance = pickNumber(get(informationSheet, "B16") ?? get(master, editedLayout ? "C13" : "C11"), data.project.advance);
+  data.project.outboundTransport = pickNumber(get(master, editedLayout ? "C14" : "C26"), data.project.outboundTransport);
   data.project.frOwn = String(get(master, "C4") ?? data.project.frOwn).toUpperCase();
-  data.project.salesGivenBy = String(get(master, "C27") ?? data.project.salesGivenBy);
-  data.project.openedBy = String(get(master, "C28") ?? data.project.openedBy);
-  data.project.openedDesignation = String(get(master, "C29") ?? openedByOptions.find((item) => item.name === data.project.openedBy)?.designation ?? data.project.openedDesignation);
-  data.project.existingOutlets = pickNumber(get(forecastSheet, "C33") ?? get(master, "C30"), data.project.existingOutlets);
-  data.forecast.marketNearby = String(get(forecastSheet, "F7") ?? data.forecast.marketNearby);
-  data.forecast.avgDepartmentalSales = pickNumber(get(forecastSheet, "F8"), data.forecast.avgDepartmentalSales);
-  data.forecast.roadStatus = String(get(forecastSheet, "F9") ?? data.forecast.roadStatus).toUpperCase();
-  data.forecast.worshipCount = pickNumber(get(forecastSheet, "F10"), data.forecast.worshipCount);
-  data.forecast.educationCount = pickNumber(get(forecastSheet, "F11"), data.forecast.educationCount);
-  data.forecast.bankOfficeCount = pickNumber(get(forecastSheet, "F12"), data.forecast.bankOfficeCount);
-  data.forecast.competitorAvgSales = pickNumber(get(forecastSheet, "F13"), data.forecast.competitorAvgSales);
-  data.forecast.publicTransit = String(get(forecastSheet, "F14") ?? data.forecast.publicTransit).toUpperCase();
-  data.forecast.signboardVisibility = String(get(forecastSheet, "F16") ?? data.forecast.signboardVisibility).toUpperCase();
-  data.forecast.hotelRestaurantHospitalCount = pickNumber(get(forecastSheet, "F17"), data.forecast.hotelRestaurantHospitalCount);
+  data.project.salesGivenBy = String(get(master, editedLayout ? "C15" : "C27") ?? data.project.salesGivenBy);
+  data.project.openedBy = String(get(master, editedLayout ? "C16" : "C28") ?? data.project.openedBy);
+  data.project.openedDesignation = String(get(master, editedLayout ? "C17" : "C29") ?? openedByOptions.find((item) => item.name === data.project.openedBy)?.designation ?? data.project.openedDesignation);
+  data.project.existingOutlets = pickNumber(get(forecastSheet, editedLayout ? "C31" : "C33") ?? get(master, editedLayout ? "C18" : "C30"), data.project.existingOutlets);
+  data.project.includeExistingOutlets = true;
+  data.forecast.marketNearby = editedLayout ? "" : String(get(forecastSheet, "F7") ?? data.forecast.marketNearby);
+  data.forecast.avgDepartmentalSales = pickNumber(get(forecastSheet, editedLayout ? "F7" : "F8"), data.forecast.avgDepartmentalSales);
+  data.forecast.roadStatus = String(get(forecastSheet, editedLayout ? "F8" : "F9") ?? data.forecast.roadStatus).toUpperCase();
+  data.forecast.worshipCount = pickNumber(get(forecastSheet, editedLayout ? "F9" : "F10"), data.forecast.worshipCount);
+  data.forecast.educationCount = pickNumber(get(forecastSheet, editedLayout ? "F10" : "F11"), data.forecast.educationCount);
+  data.forecast.bankOfficeCount = pickNumber(get(forecastSheet, editedLayout ? "F11" : "F12"), data.forecast.bankOfficeCount);
+  data.forecast.competitorAvgSales = editedLayout ? 0 : pickNumber(get(forecastSheet, "F13"), data.forecast.competitorAvgSales);
+  data.forecast.publicTransit = String(get(forecastSheet, editedLayout ? "F12" : "F14") ?? data.forecast.publicTransit).toUpperCase();
+  data.forecast.signboardVisibility = String(get(forecastSheet, editedLayout ? "F14" : "F16") ?? data.forecast.signboardVisibility).toUpperCase();
+  data.forecast.hotelRestaurantHospitalCount = pickNumber(get(forecastSheet, editedLayout ? "F15" : "F17"), data.forecast.hotelRestaurantHospitalCount);
   data.information.otherIncomeRate = pickNumber(get(informationSheet, "B13"), data.information.otherIncomeRate);
   // This legacy worksheet cell can still be present in replacement workbooks,
   // but Division is now the single source of truth for the Dhaka classification.
@@ -1246,6 +1266,16 @@ export function extractFromWorkbook(workbook, sourceName = "Imported workbook") 
   // Rebuild the electricity averages from the workbook's own Electricity sheet so
   // an updated sheet always beats the built-in fallback table.
   data.advanced.electricityTable = readElectricityTable(workbook);
+  if (editedLayout) {
+    data.advanced.consumptionRate = 0.0065;
+    data.advanced.consumptionRatePnp = 0.008;
+    data.advanced.productWastageFirstMonthPnpRate = 0.0023;
+    data.advanced.productWastageFirstMonthNonPnpRate = 0.0006;
+    data.advanced.productWastageRate = 0.0058;
+    data.advanced.membershipDiscountRate = pickNumber(get("AUTO GENERATED FEASIBILITY", "B33"), 0.0025);
+    data.advanced.outletFinanceRate = pickNumber(get("AUTO GENERATED FEASIBILITY", "B48"), 0.14);
+    data.advanced.franchiseFinanceRate = pickNumber(get("AUTO GENERATED FEASIBILITY", "B65"), 0.14);
+  }
 
   const importedDecoration = pickNumber(get(informationSheet, "B19"), null);
   if (importedDecoration === null || importedDecoration === undefined) {
@@ -1259,13 +1289,13 @@ export function extractFromWorkbook(workbook, sourceName = "Imported workbook") 
     data.information.decorationCostOverride =
       Math.abs(Number(importedDecoration) - ruleValue) < 1 ? null : Number(importedDecoration);
   }
-  data.reference.autoGpPercent = pickNumber(get(informationSheet, "B10") ?? get(forecastSheet, "C23"), data.reference.autoGpPercent);
+  data.reference.autoGpPercent = pickNumber(get(informationSheet, "B10") ?? get(forecastSheet, editedLayout ? "C21" : "C23"), data.reference.autoGpPercent);
   data.reference.autoGpShareFr = pickNumber(get(informationSheet, "B7"), data.reference.autoGpShareFr);
-  data.reference.autoBasketSize = pickNumber(get(informationSheet, "B11") ?? get(forecastSheet, "C30"), data.reference.autoBasketSize);
-  data.reference.referenceSalesPerDay = pickNumber(get(forecastSheet, "C25"), data.reference.referenceSalesPerDay);
-  data.reference.referenceFootfall = pickNumber(get(forecastSheet, "C26"), data.reference.referenceFootfall);
-  data.reference.referenceBasket = pickNumber(get(forecastSheet, "C27"), data.reference.referenceBasket);
-  data.reference.referenceProfit = pickNumber(get(forecastSheet, "C28"), data.reference.referenceProfit);
+  data.reference.autoBasketSize = pickNumber(get(informationSheet, "B11") ?? get(forecastSheet, editedLayout ? "C28" : "C30"), data.reference.autoBasketSize);
+  data.reference.referenceSalesPerDay = pickNumber(get(forecastSheet, editedLayout ? "C23" : "C25"), data.reference.referenceSalesPerDay);
+  data.reference.referenceFootfall = pickNumber(get(forecastSheet, editedLayout ? "C24" : "C26"), data.reference.referenceFootfall);
+  data.reference.referenceBasket = pickNumber(get(forecastSheet, editedLayout ? "C25" : "C27"), data.reference.referenceBasket);
+  data.reference.referenceProfit = pickNumber(get(forecastSheet, editedLayout ? "C26" : "C28"), data.reference.referenceProfit);
   const lookup = extractLookup(workbook);
   data.reference.gpLookup = lookup.gpLookup;
   data.reference.basketLookup = lookup.basketLookup;
@@ -1283,7 +1313,7 @@ export function extractFromWorkbook(workbook, sourceName = "Imported workbook") 
   });
 
   const categories = [];
-  for (let row = 21; row <= 80; row += 1) {
+  for (let row = editedLayout ? 19 : 21; row <= (editedLayout ? 36 : 80); row += 1) {
     const name = get(forecastSheet, `E${row}`);
     const value = optionalNumber(get(forecastSheet, `H${row}`));
     if (typeof name === "string" && name.trim() && value !== null && value >= 0) categories.push([name.trim(), value]);

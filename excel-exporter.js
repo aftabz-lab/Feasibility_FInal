@@ -505,7 +505,7 @@ async function addInformationSheet(workbook, data, model, assets, exportedAt) {
     ["ADVANCE", data.project.advance, "currency"],
     ["CEP VALUE", model.inputs.cepValue, "currency"],
     ["AREA OUT OF DHAKA (Y/N)", model.inputs.areaOutsideDhaka, "text"],
-    ["DECORATION COST", data.information.decorationCost, "currency"],
+    ["DECORATION COST", model.inputs.decorationCost, "currency"],
   ];
   basicRows.forEach(([label, value, type], index) => {
     const row = 6 + index;
@@ -1774,9 +1774,9 @@ function buildDashboardFeasibilityPatch(data, model) {
   formula("K8", `J8*(1+${nf(advanced.basketGrowth, 0.04)})`); yearlySum(8);
 
   formula("C9", "INFORMATION!B8"); formula("D9", "D10/30"); formula("E9", "E10/30");
-  ["G","H","I","J","K"].forEach((col) => formula(`${col}9`, `${col}10/365`)); yearlySum(9);
+  ["G","H","I","J","K"].forEach((col) => formula(`${col}9`, `${col}10/360`)); yearlySum(9);
 
-  formula("C10", "C9*30"); formula("D10", "C10"); formula("E10", "D10"); formula("G10", "SUM(C10:E10)*4");
+  formula("C10", "C9*30"); formula("D10", "C10"); formula("E10", "D10"); formula("G10", "C10*12");
   formula("H10", `G10*(1+${nf(advanced.salesGrowthYear2, 0.12)})`);
   formula("I10", `H10*(1+${nf(advanced.salesGrowthYear3, 0.10)})`);
   formula("J10", `I10*(1+${nf(advanced.salesGrowthYear4, 0.10)})`);
@@ -1808,15 +1808,24 @@ function buildDashboardFeasibilityPatch(data, model) {
 
   formula("C23", `(C3*${nf(advanced.outletDepreciablePortion, 0.7)})/${nf(advanced.outletDepreciationMonths, 60)}`); flatMonthly(23);
 
-  values.B24 = Number(advanced.consumptionRate ?? 0.0065);
+  const pnpConsumptionRate = Number(advanced.consumptionRatePnp ?? 0.008);
+  const nonPnpConsumptionRate = Number(advanced.consumptionRate ?? 0.0065);
+  const consumptionRate = String(data?.project?.pnp || "").trim().toUpperCase() === "Y"
+    ? pnpConsumptionRate
+    : nonPnpConsumptionRate;
+  values.B24 = consumptionRate;
+  formula("B24", `IF('Sales forecasting tools'!C20="Y",${nf(pnpConsumptionRate)},${nf(nonPnpConsumptionRate)})`, consumptionRate);
   ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}24`, `$B$24*${col}10`)); yearlySum(24);
 
   values.C25 = Number(advanced.electricityMonthly || 0); flatMonthly(25);
 
   const wastageRate = Number(advanced.productWastageRate ?? 0.0058);
-  values.B26 = String(data?.project?.pnp || "").trim().toUpperCase() === "Y" ? wastageRate : 0;
-  formula("B26", `IF(UPPER(INFORMATION!B14)="Y",${nf(wastageRate)},0)`, Number(values.B26));
-  ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}26`, `$B$26*${col}10`)); yearlySum(26);
+  const firstMonthPnpWastageRate = Number(advanced.productWastageFirstMonthPnpRate ?? 0.0023);
+  const firstMonthNonPnpWastageRate = Number(advanced.productWastageFirstMonthNonPnpRate ?? 0.0006);
+  values.B26 = String(data?.project?.pnp || "").trim().toUpperCase();
+  formula("B26", "INFORMATION!B14", values.B26);
+  formula("C26", `IF($B$26="Y",C10*${nf(firstMonthPnpWastageRate)},C10*${nf(firstMonthNonPnpWastageRate)})`);
+  ["D","E","G","H","I","J","K"].forEach((col) => formula(`${col}26`, `IF($B$26="Y",${col}10*${nf(wastageRate)},0)`)); yearlySum(26);
 
   values.C27 = Number(advanced.maintenanceMonthly || 0); flatMonthly(27);
   values.B28 = ""; values.C28 = Number(advanced.securityCostMonthly || 0); flatMonthly(28);
@@ -1835,7 +1844,7 @@ function buildDashboardFeasibilityPatch(data, model) {
   formula("C32", `IF(INFORMATION!B18="Y",${nf(advanced.cityChargeOutsideDhakaMonthly, 6500)},${nf(advanced.cityChargeDhakaMonthly, 4500)})`);
   flatMonthly(32);
 
-  values.B33 = Number(advanced.membershipDiscountRate ?? 0.0038);
+  values.B33 = Number(advanced.membershipDiscountRate ?? 0.0025);
   ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}33`, `$B$33*${col}10`)); yearlySum(33);
 
   values.C34 = Number(advanced.insuranceMonthly ?? 2500); flatMonthly(34);
@@ -1864,12 +1873,12 @@ function buildDashboardFeasibilityPatch(data, model) {
   const depPortion = nf(advanced.outletDepreciablePortion, 0.7);
   const freeDays = nf(advanced.stockFreeHoldingDays, 55);
   ["C","D","E"].forEach((col) => formula(`${col}48`, `($C$3*${depPortion})*$B$48/12+IF(${col}5>${freeDays},(${col}5-${freeDays})*${col}9*(1-${col}14)*$B$48/12,0)`));
-  formula("G48", "C48*12");
+  formula("G48", "SUM(C48:E48)*4");
   ["H","I","J","K"].forEach((col) => formula(`${col}48`, `($C$3*${depPortion})*$B$48+IF(${col}5>${freeDays},(${col}5-${freeDays})*${col}9*(1-${col}14)*$B$48,0)`)); yearlySum(48);
 
   ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}50`, `${col}46-${col}48`)); yearlySum(50);
 
-  formula("C52", "Master!C26"); formula("D52", "C52"); formula("E52", "D52"); formula("G52", "SUM(C52:E52)*4");
+  formula("C52", "Master!C14"); formula("D52", "C52"); formula("E52", "D52"); formula("G52", "SUM(C52:E52)*4");
   formula("H52", `G52*(1+${nf(advanced.transportEscalation, 0.05)})`);
   formula("I52", `H52*(1+${nf(advanced.transportEscalation, 0.05)})`);
   formula("J52", `I52*(1+${nf(advanced.transportEscalation, 0.05)})`);
@@ -1895,7 +1904,7 @@ function buildDashboardFeasibilityPatch(data, model) {
 
   formula("C64", `IF(UPPER(Master!C4)="FR",C57/${nf(advanced.franchiseDepreciationMonths, 120)},0)`); flatMonthly(64);
 
-  values.B65 = Number(advanced.franchiseFinanceRate ?? 0.09);
+  values.B65 = Number(advanced.franchiseFinanceRate ?? 0.14);
   formula("C65", 'IF(UPPER(Master!C4)="FR",($C$57+$C$58+$C$59)*$B$65/12,0)'); flatMonthly(65);
 
   values.B68 = "";
@@ -1976,95 +1985,88 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     C5: Number(data?.project?.sft || 0),
     C6: data?.project?.density ?? "",
     C7: data?.project?.incomeLevel ?? "",
-    C8: Number(data?.project?.longFeet || 0),
+    B8: data?.project?.locationType ?? "",
+    B9: data?.project?.division ?? "",
+    C10: Number(data?.project?.longFeet || 0),
     // Resolved daily sales is authoritative. This also keeps category mix and
     // Information B8/B9 aligned when the dashboard uses a monthly-sales override.
-    C9: Number(model?.inputs?.dailySales ?? data?.project?.projectedDailySales ?? 0),
-    C10: Number(data?.project?.monthlyRent || 0),
-    C11: Number(data?.project?.advance || 0),
-    C12: Number(staffById(data, "om").quantity || 0),
-    C13: Number(staffById(data, "icmo").quantity || 0),
-    C14: Number(staffById(data, "duty").quantity || 0),
-    C15: Number(staffById(data, "cg").quantity || 0),
-    C16: Number(staffById(data, "commodity").quantity || 0),
-    C17: Number(staffById(data, "protein").quantity || 0),
-    C18: Number(staffById(data, "perishables").quantity || 0),
-    C19: Number(staffById(data, "gml").quantity || 0),
-    C20: Number(staffById(data, "pos").quantity || 0),
-    C21: Number(staffById(data, "porter").quantity || 0),
-    C22: Number(staffById(data, "bsm").quantity || 0),
-    C23: Number(staffById(data, "bkstr").quantity || 0),
-    C24: Number(staffById(data, "security").quantity || 0),
-    C25: Number(staffById(data, "cleaner").quantity || 0),
-    C26: Number(data?.project?.outboundTransport || 0),
-    C27: data?.project?.salesGivenBy ?? "",
-    C28: data?.project?.openedBy ?? "",
-    C30: Number(data?.project?.existingOutlets || 0),
+    C11: Number(model?.inputs?.dailySales ?? data?.project?.projectedDailySales ?? 0),
+    C12: Number(data?.project?.monthlyRent || 0),
+    C13: Number(data?.project?.advance || 0),
+    C14: Number(data?.project?.outboundTransport || 0),
+    C15: data?.project?.salesGivenBy ?? "",
+    C16: data?.project?.openedBy ?? "",
+    C18: Number(data?.project?.existingOutlets || 0),
   };
   patchWorksheetValues(zip, paths.get("Master"), masterValues);
+  patchWorksheetFormulas(zip, paths.get("Master"), {
+    C17: dashboardFormulaSpec(
+      "VLOOKUP(C16,E8:F15,2,0)",
+      data?.project?.openedDesignation ?? "",
+    ),
+  });
 
   const forecastValues = {
-    C21: data?.project?.division ?? "",
-    C24: model?.dhakaClassification ?? "Dhaka",
-    E6: data?.project?.locationType ?? "",
-    F7: data?.forecast?.marketNearby ?? "",
-    F8: Number(data?.forecast?.avgDepartmentalSales || 0),
-    F9: data?.forecast?.roadStatus ?? "",
-    F10: Number(data?.forecast?.worshipCount || 0),
-    F11: Number(data?.forecast?.educationCount || 0),
-    F12: Number(data?.forecast?.bankOfficeCount || 0),
-    F13: Number(data?.forecast?.competitorAvgSales || 0),
-    F14: data?.forecast?.publicTransit ?? "",
-    F16: data?.forecast?.signboardVisibility ?? "",
-    F17: Number(data?.forecast?.hotelRestaurantHospitalCount || 0),
-    C23: optionalWorkbookValue(data?.project?.gpPercentOverride),
-    C30: optionalWorkbookValue(data?.information?.basketSizeOverride),
-    C32: optionalWorkbookValue(data?.information?.footfallOverride),
+    F7: Number(data?.forecast?.avgDepartmentalSales || 0),
+    F8: data?.forecast?.roadStatus ?? "",
+    F9: Number(data?.forecast?.worshipCount || 0),
+    F10: Number(data?.forecast?.educationCount || 0),
+    F11: Number(data?.forecast?.bankOfficeCount || 0),
+    F12: data?.forecast?.publicTransit ?? "",
+    F14: data?.forecast?.signboardVisibility ?? "",
+    F15: Number(data?.forecast?.hotelRestaurantHospitalCount || 0),
+    C21: optionalWorkbookValue(data?.project?.gpPercentOverride),
+    C28: optionalWorkbookValue(data?.information?.basketSizeOverride),
+    C30: optionalWorkbookValue(data?.information?.footfallOverride),
   };
   patchWorksheetValues(zip, paths.get("Sales forecasting tools"), forecastValues);
   patchWorksheetFormulas(zip, paths.get("Sales forecasting tools"), {
-    // C20 remains formula-driven by Master!C2, but its cached display value must
+    // Keep the edited workbook's three leading project fields formula-driven,
     // also be refreshed so the downloaded workbook immediately shows the live
-    // Data Entry location even before Excel performs a recalculation.
-    C20: dashboardFormulaSpec(
+    // Data Entry values even before Excel performs a recalculation.
+    C18: dashboardFormulaSpec(
       "Master!C2",
       data?.project?.locationArea ?? "",
     ),
-    C24: dashboardFormulaSpec(
-      'IF(OR(LOWER(TRIM(C21))="dhaka",SUBSTITUTE(LOWER(TRIM(C21))," ","")="dhakagbud"),"Dhaka","Out of Dhaka")',
+    C19: dashboardFormulaSpec("Master!B9", data?.project?.division ?? ""),
+    C20: dashboardFormulaSpec("Master!C3", data?.project?.pnp ?? ""),
+    C22: dashboardFormulaSpec(
+      'IF(OR(LOWER(TRIM(C19))="dhaka",SUBSTITUTE(LOWER(TRIM(C19))," ","")="dhakagbud"),"Dhaka","Out of Dhaka")',
       model?.dhakaClassification ?? "Dhaka",
     ),
+    C31: dashboardFormulaSpec("Master!C18", Number(data?.project?.existingOutlets || 0)),
   });
 
   const forecastFormulaCaches = {
     F3: Number(data?.project?.sft || 0),
     F4: data?.project?.density ?? "",
     F5: data?.project?.incomeLevel ?? "",
-    F15: Number(data?.project?.longFeet || 0),
-    C22: data?.project?.pnp ?? "",
-    C25: Number(data?.reference?.referenceSalesPerDay || 0),
-    C26: Number(data?.reference?.referenceFootfall || 0),
-    C27: Number(data?.reference?.referenceBasket || 0),
-    C28: Number(data?.reference?.referenceProfit || 0),
-    C31: Number(model?.inputs?.dailySales || 0),
-    C33: Number(data?.project?.existingOutlets || 0),
-    H39: Number(model?.inputs?.dailySales || 0),
+    E6: data?.project?.locationType ?? "",
+    F13: Number(data?.project?.longFeet || 0),
+    C23: Number(data?.reference?.referenceSalesPerDay || 0),
+    C24: Number(data?.reference?.referenceFootfall || 0),
+    C25: Number(data?.reference?.referenceBasket || 0),
+    C26: Number(data?.reference?.referenceProfit || 0),
+    C29: Number(model?.inputs?.dailySales || 0),
+    C30: Number(model?.inputs?.dailyFootfall || 0),
+    C31: Number(data?.project?.existingOutlets || 0),
+    H37: Number(model?.inputs?.dailySales || 0),
   };
 
   // Auto-mode cells keep the template formula. Manual overrides above replace
   // the formula with the entered value, so only refresh these caches in auto.
   if (optionalWorkbookValue(data?.project?.gpPercentOverride) === undefined) {
-    forecastFormulaCaches.C23 = Number(model?.inputs?.gpPercent || 0);
+    forecastFormulaCaches.C21 = Number(model?.inputs?.gpPercent || 0);
   }
   if (optionalWorkbookValue(data?.information?.basketSizeOverride) === undefined) {
-    forecastFormulaCaches.C30 = Number(model?.inputs?.basketSize || 0);
+    forecastFormulaCaches.C28 = Number(model?.inputs?.basketSize || 0);
   }
   if (optionalWorkbookValue(data?.information?.footfallOverride) === undefined) {
-    forecastFormulaCaches.C32 = Number(model?.inputs?.dailyFootfall || 0);
+    forecastFormulaCaches.C30 = Number(model?.inputs?.dailyFootfall || 0);
   }
 
   const forecastCalculatedFormulas = {};
-  (model?.forecastScore?.rows || []).slice(0, 14).forEach((row, index) => {
+  (model?.forecastScore?.rows || []).slice(0, 12).forEach((row, index) => {
     const excelRow = index + 4;
     forecastFormulaCaches[`H${excelRow}`] = Number(row.mark || 0);
     forecastCalculatedFormulas[`I${excelRow}`] = dashboardFormulaSpec(
@@ -2072,16 +2074,16 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
       Number(row.mark || 0) * Number(row.weight || 0) / 100,
     );
   });
-  forecastCalculatedFormulas.I18 = dashboardFormulaSpec(
-    "SUM(I4:I17)",
+  forecastCalculatedFormulas.I16 = dashboardFormulaSpec(
+    "SUM(I4:I15)",
     Number(model?.forecastScore?.total || 0) / 100,
   );
 
-  (model?.categories || []).slice(0, 18).forEach((category, index) => {
-    // Row 29 is a visual separator in the source forecasting sheet.
-    const excelRow = index < 8 ? index + 21 : index + 22;
+  (model?.categories || []).slice(0, 17).forEach((category, index) => {
+    // Row 27 is a visual separator in the edited forecasting sheet.
+    const excelRow = index < 8 ? index + 19 : index + 20;
     forecastCalculatedFormulas[`H${excelRow}`] = dashboardFormulaSpec(
-      `(IF($C$22="Y",U${excelRow},V${excelRow}))*$H$39`,
+      `(IF($C$20="Y",U${excelRow + 2},V${excelRow + 2}))*$H$37`,
       Number(category.perDaySales || 0),
     );
     forecastCalculatedFormulas[`I${excelRow}`] = dashboardFormulaSpec(
@@ -2089,8 +2091,8 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
       Number(category.monthlySales || 0),
     );
   });
-  forecastCalculatedFormulas.I39 = dashboardFormulaSpec(
-    "H39*30",
+  forecastCalculatedFormulas.I37 = dashboardFormulaSpec(
+    "H37*30",
     Number(model?.inputs?.monthlySales || 0),
   );
 
@@ -2107,7 +2109,7 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
   setWorksheetRowsHidden(
     zip,
     paths.get("Sales forecasting tools"),
-    [33],
+    [31],
     data?.project?.includeExistingOutlets !== true,
   );
 
@@ -2146,7 +2148,7 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
   const pnpBandIndex = 'IF($B$9<=2700000,1,IF($B$9<=3000000,2,IF($B$9<=3300000,3,IF($B$9<=3600000,4,IF($B$9<=3900000,5,IF($B$9<=4200000,6,IF($B$9<=4500000,7,IF($B$9<=4800000,8,IF($B$9<=5100000,9,IF($B$9<=5400000,10,IF($B$9<=5700000,11,IF($B$9<=6000000,12,IF($B$9<=6300000,13,IF($B$9<=6600000,14,IF($B$9<=6900000,15,IF($B$9<=7200000,16,IF($B$9<=7500000,17,IF($B$9<=7800000,18,IF($B$9<=8100000,19,IF($B$9<=8400000,20,IF($B$9<=8700000,21,IF($B$9<=9000000,22,IF($B$9<=9300000,23,IF($B$9<=9600000,24,25))))))))))))))))))))))))';
   const informationFormulas = {
     B18: dashboardFormulaSpec(
-      'IF(OR(LOWER(TRIM(\'Sales forecasting tools\'!C21))="dhaka",SUBSTITUTE(LOWER(TRIM(\'Sales forecasting tools\'!C21))," ","")="dhakagbud"),"N","Y")',
+      'IF(OR(LOWER(TRIM(\'Sales forecasting tools\'!C19))="dhaka",SUBSTITUTE(LOWER(TRIM(\'Sales forecasting tools\'!C19))," ","")="dhakagbud"),"N","Y")',
       model?.inputs?.areaOutsideDhaka ?? "N",
     ),
   };
