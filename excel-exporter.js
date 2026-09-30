@@ -1403,10 +1403,48 @@ function existingOutletsWorksheetXml(data) {
   <sheetFormatPr defaultRowHeight="18"/>
   <cols><col min="1" max="1" width="32" customWidth="1"/><col min="2" max="2" width="45" customWidth="1"/><col min="3" max="3" width="20" customWidth="1"/><col min="4" max="4" width="28" customWidth="1"/><col min="5" max="6" width="17" customWidth="1"/></cols>
   <sheetData>${rows.join("")}</sheetData>
-  <mergeCells count="1"><mergeCell ref="A1:F1"/></mergeCells>
   <autoFilter ref="A6:F${lastRow}"/>
+  <mergeCells count="1"><mergeCell ref="A1:F1"/></mergeCells>
   <pageMargins left="0.25" right="0.25" top="0.35" bottom="0.35" header="0.1" footer="0.1"/>
 </worksheet>`;
+}
+
+/*
+ * Excel requires worksheet child elements in SpreadsheetML schema order.
+ * It also expects docProps/app.xml to describe the same worksheet collection
+ * as workbook.xml. The browser exporter adds the two dashboard support sheets
+ * directly to the OOXML package, so keep those extended properties in sync.
+ */
+function synchronizeExtendedWorksheetProperties(zip) {
+  const workbookEntry = zipEntry(zip, "xl/workbook.xml");
+  const appEntry = zipEntry(zip, "docProps/app.xml");
+  if (!workbookEntry || !appEntry) return;
+
+  const sheetNames = workbookSheetNames(readXmlContent(workbookEntry));
+  let appXml = readXmlContent(appEntry);
+  const worksheetCountPattern = /(<vt:lpstr>Worksheets<\/vt:lpstr>[\s\S]*?<vt:i4>)(\d+)(<\/vt:i4>)/i;
+  const worksheetCountMatch = appXml.match(worksheetCountPattern);
+  const previousWorksheetCount = Number(worksheetCountMatch?.[2]);
+  if (!Number.isFinite(previousWorksheetCount)) return;
+
+  const titlesPattern = /(<TitlesOfParts\b[^>]*>\s*<vt:vector\b[^>]*\bsize=")(\d+)("[^>]*>)([\s\S]*?)(<\/vt:vector>\s*<\/TitlesOfParts>)/i;
+  const titlesMatch = appXml.match(titlesPattern);
+  if (!titlesMatch) return;
+
+  const existingTitles = titlesMatch[4].match(/<vt:lpstr\b[^>]*>[\s\S]*?<\/vt:lpstr>/gi) || [];
+  const nonWorksheetTitles = existingTitles.slice(Math.min(previousWorksheetCount, existingTitles.length));
+  const worksheetTitles = sheetNames.map((name) => `<vt:lpstr>${encodeXmlText(name)}</vt:lpstr>`);
+  const synchronizedTitles = [...worksheetTitles, ...nonWorksheetTitles];
+
+  appXml = appXml.replace(
+    worksheetCountPattern,
+    `$1${sheetNames.length}$3`,
+  );
+  appXml = appXml.replace(
+    titlesPattern,
+    `$1${synchronizedTitles.length}$3${synchronizedTitles.join("")}$5`,
+  );
+  writeXmlContent(appEntry, appXml);
 }
 
 function ensureWorksheetPart(zip, sheetName, sheetXml, hidden = false) {
@@ -1465,6 +1503,7 @@ function ensureWorksheetPart(zip, sheetName, sheetXml, hidden = false) {
 function upsertDashboardSupportSheets(zip, data) {
   ensureWorksheetPart(zip, DASHBOARD_RULES_SHEET_NAME, dashboardRulesWorksheetXml(data), true);
   ensureWorksheetPart(zip, EXISTING_OUTLETS_SHEET_NAME, existingOutletsWorksheetXml(data), data?.project?.includeExistingOutlets !== true);
+  synchronizeExtendedWorksheetProperties(zip);
 }
 
 function packageEntryPaths(zip) {
