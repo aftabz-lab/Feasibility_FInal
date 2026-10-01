@@ -1113,12 +1113,33 @@ function refreshWorksheetFormulaCaches(zip, path, values) {
       "i",
     );
     const current = xml.match(pairedCellPattern)?.[0] || "";
-    const formulaMatch = current.match(/<f\b[^>]*>([\s\S]*?)<\/f>/i);
-    if (!formulaMatch) {
+    const formulaNode = current.match(/<f\b[^>]*(?:\/>|>[\s\S]*?<\/f>)/i)?.[0];
+    if (!formulaNode) {
       throw new Error(`The master workbook is missing the expected formula in ${safeAddress}.`);
     }
-    const existingFormula = decodeXmlEntities(formulaMatch[1]);
-    xml = replaceFormulaCell(xml, safeAddress, existingFormula, cachedValue);
+
+    // Keep the source formula node byte-for-byte, including shared-formula
+    // attributes. Only its cached result is refreshed. This prevents a cache
+    // update from silently rewriting a workbook-owned calculation rule.
+    let type = "";
+    let cachedXml;
+    if (typeof cachedValue === "number") {
+      if (!Number.isFinite(cachedValue)) throw new Error(`Invalid numeric value for ${safeAddress}.`);
+      cachedXml = `<v>${String(cachedValue)}</v>`;
+    } else if (typeof cachedValue === "boolean") {
+      type = "b";
+      cachedXml = `<v>${cachedValue ? "1" : "0"}</v>`;
+    } else {
+      type = "str";
+      cachedXml = `<v>${encodeXmlText(cachedValue ?? "")}</v>`;
+    }
+    const openingTag = openingCellTag(current, safeAddress, type);
+    let body = current
+      .replace(/^<c\b[^>]*>/i, "")
+      .replace(/<\/c>$/i, "")
+      .replace(/<v\b[^>]*>[\s\S]*?<\/v>/i, "");
+    body = body.replace(formulaNode, `${formulaNode}${cachedXml}`);
+    xml = xml.replace(pairedCellPattern, `${openingTag}${body}</c>`);
   });
 
   writeXmlContent(entry, xml);
@@ -1608,25 +1629,10 @@ function clearWorksheetRowsForSnapshot(zip, path, startRow, endRow, finalRow) {
   if (!entry) throw new Error(`The master workbook is missing ${path}.`);
   let xml = readXmlContent(entry);
 
-  for (let rowNumber = startRow; rowNumber <= endRow; rowNumber += 1) {
-    const rowPattern = new RegExp(
-      `<row\\b(?=[^>]*\\br="${rowNumber}")[^>]*>[\\s\\S]*?<\\/row>`,
-      "gi",
-    );
-    xml = xml.replace(rowPattern, (rowXml) => rowXml.replace(
-      /<c\b[^>]*\/>|<c\b(?![^>]*\/>)\s*[^>]*>[\s\S]*?<\/c>/gi,
-      (cellXml) => {
-        const opening = cellXml.match(/^<c\b[^>]*/i)?.[0] || "<c";
-        const blankOpening = opening
-          .replace(/\s+t="[^"]*"/gi, "")
-          .replace(/\/\s*$/, "");
-        return `${blankOpening}/>`;
-      },
-    ));
-  }
-
   // A two-cell image anchor must terminate on a real worksheet row for
   // consistent rendering in Excel, LibreOffice and mobile spreadsheet apps.
+  // Preserve the template's signatory cells and formulas underneath the image;
+  // the attached workbook remains the calculation authority for this sheet.
   for (let rowNumber = endRow + 1; rowNumber <= finalRow; rowNumber += 1) {
     const existingRow = new RegExp(`<row\\b(?=[^>]*\\br="${rowNumber}")[^>]*(?:\\/\\s*>|>[\\s\\S]*?<\\/row>)`, "i");
     if (!existingRow.test(xml)) {
@@ -1637,11 +1643,6 @@ function clearWorksheetRowsForSnapshot(zip, path, startRow, endRow, finalRow) {
     }
   }
 
-  // Do not leave signatory cell merges beneath the single snapshot picture.
-  xml = xml.replace(/<mergeCell\b[^>]*\bref="([^"]+)"[^>]*\/\s*>/gi, (tag, reference) => {
-    const rows = [...String(reference).matchAll(/\$?[A-Z]+\$?(\d+)/gi)].map((match) => Number(match[1]));
-    return rows.some((row) => row >= startRow && row <= endRow) ? "" : tag;
-  });
   xml = xml.replace(/<dimension\b[^>]*\bref="([^"]+)"[^>]*\/\s*>/i, (tag, reference) => {
     const revised = String(reference).replace(/(\$?[A-Z]+\$?)\d+$/, `$1${finalRow}`);
     return tag.replace(reference, revised);
@@ -1938,7 +1939,10 @@ function setWorkbookSheetVisibility(workbookXml, visibleSheetNames) {
       .replace(/\s+calcMode="[^"]*"/i, "")
       .replace(/\s+fullCalcOnLoad="[^"]*"/i, "")
       .replace(/\s+forceFullCalc="[^"]*"/i, "");
-    return revised.replace(/\/>$/, ' calcMode="auto" calcCompleted="1" fullCalcOnLoad="0" forceFullCalc="0"/>');
+    // Dashboard inputs change while the three report sheets retain the source
+    // workbook's exact formulas. Force Excel to recalculate those unchanged
+    // rules on open instead of trusting any template-era cached results.
+    return revised.replace(/\/>$/, ' calcMode="auto" calcCompleted="0" fullCalcOnLoad="1" forceFullCalc="1"/>');
   });
   return output;
 }
@@ -2236,6 +2240,34 @@ function buildDashboardFeasibilityPatch(data, model) {
   return { values, formulas };
 }
 
+function buildTemplateFeasibilityInputValues(data, model) {
+  const advanced = data?.advanced || {};
+  return {
+    C25: Number(advanced.electricityMonthly || 0),
+    C27: Number(advanced.maintenanceMonthly || 0),
+    C29: Number(advanced.generatorMonthly || 0),
+    C31: Number(advanced.outletOpexInitial ?? 25000),
+    D31: Number(advanced.outletOpexRecurringMonthly ?? 5000),
+    B33: Number(advanced.membershipDiscountRate ?? 0.0025),
+    C34: Number(advanced.insuranceMonthly ?? 2500),
+    C35: Number(advanced.promotionalMonthly || 0),
+    B37: Number(advanced.denominationRate ?? 0.0003),
+    B38: Number(advanced.creditCardRate ?? 0.003),
+    C39: Number(advanced.conveyanceMonthly ?? 4000),
+    C40: Number(advanced.printingMonthly ?? 2500),
+    C41: Number(advanced.entertainmentMonthly ?? 1000),
+    B48: Number(advanced.outletFinanceRate ?? 0.14),
+    C59: Number(advanced.securityDeposit || 0),
+    B65: Number(advanced.franchiseFinanceRate ?? 0.14),
+    G67: Number(advanced.terminalRecovery ?? 3000000),
+    C69: Number(advanced.franchiseMaintenanceMonthly ?? 2000),
+    C70: Number(advanced.franchiseGeneratorMonthly ?? 2000),
+    C71: Number(advanced.franchiseIceMonthly || 0),
+    C72: Number(advanced.franchiseServiceMonthly || 0),
+    B88: Number(model?.metrics?.discountRate ?? advanced.discountRate ?? 0.09),
+  };
+}
+
 export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt, approvalSnapshotPng = null) {
   const cfbApi = getCfbApi();
   const zip = cfbApi.read(asUint8Array(templateBuffer), { type: "array" });
@@ -2291,40 +2323,20 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     F12: data?.forecast?.publicTransit ?? "",
     F14: data?.forecast?.signboardVisibility ?? "",
     F15: Number(data?.forecast?.hotelRestaurantHospitalCount || 0),
+    C31: data?.project?.includeExistingOutlets === true
+      ? Number(data?.project?.existingOutlets || 0)
+      : "",
     C21: optionalWorkbookValue(data?.project?.gpPercentOverride),
     C28: optionalWorkbookValue(data?.information?.basketSizeOverride),
     C30: optionalWorkbookValue(data?.information?.footfallOverride),
   };
   patchWorksheetValues(zip, paths.get("Sales forecasting tools"), forecastValues);
-  patchWorksheetFormulas(zip, paths.get("Sales forecasting tools"), {
-    // Keep the edited workbook's three leading project fields formula-driven,
-    // also be refreshed so the downloaded workbook immediately shows the live
-    // Data Entry values even before Excel performs a recalculation.
-    C18: dashboardFormulaSpec(
-      "Master!C2",
-      data?.project?.locationArea ?? "",
-    ),
-    C19: dashboardFormulaSpec("Master!B9", data?.project?.division ?? ""),
-    C20: dashboardFormulaSpec("Master!C3", data?.project?.pnp ?? ""),
-    C22: dashboardFormulaSpec(
-      'IF(OR(LOWER(TRIM(C19))="dhaka",SUBSTITUTE(LOWER(TRIM(C19))," ","")="dhakagbud"),"Dhaka","Out of Dhaka")',
-      model?.dhakaClassification ?? "Dhaka",
-    ),
-    C31: dashboardFormulaSpec(
-      `'${EXISTING_OUTLETS_SHEET_NAME}'!$B$3`,
-      data?.project?.includeExistingOutlets === true ? Number(data?.project?.existingOutlets || 0) : 0,
-    ),
-    F8: dashboardFormulaSpec(`'${DASHBOARD_RULES_SHEET_NAME}'!$B$5`, data?.forecast?.roadStatus ?? ""),
-    F9: dashboardFormulaSpec(`'${DASHBOARD_RULES_SHEET_NAME}'!$B$6`, Number(data?.forecast?.worshipCount || 0)),
-    F10: dashboardFormulaSpec(`'${DASHBOARD_RULES_SHEET_NAME}'!$B$7`, Number(data?.forecast?.educationCount || 0)),
-    F11: dashboardFormulaSpec(`'${DASHBOARD_RULES_SHEET_NAME}'!$B$8`, Number(data?.forecast?.bankOfficeCount || 0)),
-    F12: dashboardFormulaSpec(`'${DASHBOARD_RULES_SHEET_NAME}'!$B$9`, data?.forecast?.publicTransit ?? ""),
-    F13: dashboardFormulaSpec(`'${DASHBOARD_RULES_SHEET_NAME}'!$B$10`, Number(data?.project?.longFeet || 0)),
-    F14: dashboardFormulaSpec(`'${DASHBOARD_RULES_SHEET_NAME}'!$B$11`, data?.forecast?.signboardVisibility ?? ""),
-    F15: dashboardFormulaSpec(`'${DASHBOARD_RULES_SHEET_NAME}'!$B$12`, Number(data?.forecast?.hotelRestaurantHospitalCount || 0)),
-  });
 
   const forecastFormulaCaches = {
+    C18: data?.project?.locationArea ?? "",
+    C19: data?.project?.division ?? "",
+    C20: data?.project?.pnp ?? "",
+    C22: model?.dhakaClassification ?? "Dhaka",
     F3: Number(data?.project?.sft || 0),
     F4: data?.project?.density ?? "",
     F5: data?.project?.incomeLevel ?? "",
@@ -2336,9 +2348,6 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     C26: Number(data?.reference?.referenceProfit || 0),
     C29: Number(model?.inputs?.dailySales || 0),
     C30: Number(model?.inputs?.dailyFootfall || 0),
-    C31: data?.project?.includeExistingOutlets === true
-      ? Number(data?.project?.existingOutlets || 0)
-      : 0,
     H37: Number(model?.inputs?.dailySales || 0),
   };
 
@@ -2354,46 +2363,26 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     forecastFormulaCaches.C30 = Number(model?.inputs?.dailyFootfall || 0);
   }
 
-  const forecastCalculatedFormulas = {};
+  const forecastCalculatedFormulaCaches = {};
   (model?.forecastScore?.rows || []).slice(0, 12).forEach((row, index) => {
     const excelRow = index + 4;
     forecastFormulaCaches[`H${excelRow}`] = Number(row.mark || 0);
-    forecastCalculatedFormulas[`I${excelRow}`] = dashboardFormulaSpec(
-      `(H${excelRow}/D${excelRow})*C${excelRow}`,
-      Number(row.mark || 0) * Number(row.weight || 0) / 100,
-    );
+    forecastCalculatedFormulaCaches[`I${excelRow}`] = Number(row.mark || 0) * Number(row.weight || 0) / 100;
   });
-  forecastCalculatedFormulas.I16 = dashboardFormulaSpec(
-    "SUM(I4:I15)",
-    Number(model?.forecastScore?.total || 0) / 100,
-  );
+  forecastCalculatedFormulaCaches.I16 = Number(model?.forecastScore?.total || 0) / 100;
 
   (model?.categories || []).slice(0, 17).forEach((category, index) => {
     // Row 27 is a visual separator in the edited forecasting sheet.
     const excelRow = index < 8 ? index + 19 : index + 20;
-    forecastCalculatedFormulas[`H${excelRow}`] = dashboardFormulaSpec(
-      `(IF($C$20="Y",U${excelRow + 2},V${excelRow + 2}))*$H$37`,
-      Number(category.perDaySales || 0),
-    );
-    forecastCalculatedFormulas[`I${excelRow}`] = dashboardFormulaSpec(
-      `H${excelRow}*30`,
-      Number(category.monthlySales || 0),
-    );
+    forecastCalculatedFormulaCaches[`H${excelRow}`] = Number(category.perDaySales || 0);
+    forecastCalculatedFormulaCaches[`I${excelRow}`] = Number(category.monthlySales || 0);
   });
-  forecastCalculatedFormulas.I37 = dashboardFormulaSpec(
-    "H37*30",
-    Number(model?.inputs?.monthlySales || 0),
-  );
+  forecastCalculatedFormulaCaches.I37 = Number(model?.inputs?.monthlySales || 0);
 
   refreshWorksheetFormulaCaches(
     zip,
     paths.get("Sales forecasting tools"),
-    forecastFormulaCaches,
-  );
-  patchWorksheetFormulas(
-    zip,
-    paths.get("Sales forecasting tools"),
-    forecastCalculatedFormulas,
+    { ...forecastFormulaCaches, ...forecastCalculatedFormulaCaches },
   );
   setWorksheetRowsHidden(
     zip,
@@ -2408,7 +2397,6 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     B9: undefined,
     B13: Number(data?.information?.otherIncomeRate || 0),
     B17: optionalWorkbookValue(data?.information?.cepValueOverride),
-    B18: model?.inputs?.areaOutsideDhaka ?? "N",
     B19: optionalWorkbookValue(data?.information?.decorationCostOverride),
     F7: Number(staffById(data, "om").salary || 0),
     F8: Number(staffById(data, "icmo").salary || 0),
@@ -2433,29 +2421,19 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     [16, "gml"], [17, "pos"], [18, "porter"], [19, "bsm"], [20, "bkstr"],
     [21, "security"], [22, "cleaner"],
   ];
-  const nonPnpBandIndex = 'IF($B$9<=1500000,1,IF($B$9<=1800000,2,IF($B$9<=2100000,3,IF($B$9<=2400000,4,IF($B$9<=2700000,5,IF($B$9<=3000000,6,IF($B$9<=3300000,7,IF($B$9<=3600000,8,IF($B$9<=3900000,9,IF($B$9<=4200000,10,IF($B$9<=4500000,11,IF($B$9<=4800000,12,13))))))))))))';
-  const pnpBandIndex = 'IF($B$9<=2700000,1,IF($B$9<=3000000,2,IF($B$9<=3300000,3,IF($B$9<=3600000,4,IF($B$9<=3900000,5,IF($B$9<=4200000,6,IF($B$9<=4500000,7,IF($B$9<=4800000,8,IF($B$9<=5100000,9,IF($B$9<=5400000,10,IF($B$9<=5700000,11,IF($B$9<=6000000,12,IF($B$9<=6300000,13,IF($B$9<=6600000,14,IF($B$9<=6900000,15,IF($B$9<=7200000,16,IF($B$9<=7500000,17,IF($B$9<=7800000,18,IF($B$9<=8100000,19,IF($B$9<=8400000,20,IF($B$9<=8700000,21,IF($B$9<=9000000,22,IF($B$9<=9300000,23,IF($B$9<=9600000,24,25))))))))))))))))))))))))';
-  const informationFormulas = {
-    B18: dashboardFormulaSpec(
-      'IF(OR(LOWER(TRIM(\'Sales forecasting tools\'!C19))="dhaka",SUBSTITUTE(LOWER(TRIM(\'Sales forecasting tools\'!C19))," ","")="dhakagbud"),"N","Y")',
-      model?.inputs?.areaOutsideDhaka ?? "N",
-    ),
-  };
+  const staffFormulaCaches = {};
 
   manpowerRows.forEach(([row, id]) => {
     const qty = Number(staffById(data, id).quantity || 0);
     if (manpowerAuto) {
-      informationFormulas[`E${row}`] = dashboardFormulaSpec(
-        `IF(UPPER(TRIM($B$14))="Y",INDEX(MANPOWER!$G$25:$AE$38,MATCH(D${row},MANPOWER!$B$25:$B$38,0),${pnpBandIndex}),INDEX(MANPOWER!$C$4:$O$17,MATCH(D${row},MANPOWER!$B$4:$B$17,0),${nonPnpBandIndex}))`,
-        qty,
-      );
+      staffFormulaCaches[`E${row}`] = qty;
     } else {
       informationValues[`E${row}`] = qty;
     }
-    informationFormulas[`G${row}`] = dashboardFormulaSpec(`E${row}*F${row}`, qty * Number(staffById(data, id).salary || 0));
+    staffFormulaCaches[`G${row}`] = qty * Number(staffById(data, id).salary || 0);
   });
-  informationFormulas.E23 = dashboardFormulaSpec('SUM(E7:E22)', (data?.staff || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0));
-  informationFormulas.G23 = dashboardFormulaSpec('SUM(G7:G22)', (data?.staff || []).reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.salary || 0), 0));
+  staffFormulaCaches.E23 = (data?.staff || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+  staffFormulaCaches.G23 = (data?.staff || []).reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.salary || 0), 0);
 
   // When manual headcount is active, overwrite the quantity formula cells with dashboard values.
   if (!manpowerAuto) {
@@ -2463,7 +2441,6 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     manpowerRows.forEach(([row, id]) => { manualQuantities[`E${row}`] = Number(staffById(data, id).quantity || 0); });
     patchWorksheetValues(zip, paths.get("INFORMATION"), manualQuantities);
   }
-  patchWorksheetFormulas(zip, paths.get("INFORMATION"), informationFormulas);
 
   const informationFormulaCaches = {
     B4: data?.project?.locationArea ?? "",
@@ -2476,6 +2453,8 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     B14: data?.project?.pnp ?? "",
     B15: Number(data?.project?.monthlyRent || 0),
     B16: Number(data?.project?.advance || 0),
+    B18: model?.inputs?.areaOutsideDhaka ?? "N",
+    ...staffFormulaCaches,
   };
   if (optionalWorkbookValue(data?.information?.cepValueOverride) === undefined) {
     informationFormulaCaches.B17 = Number(model?.inputs?.cepValue || 0);
@@ -2489,15 +2468,19 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     informationFormulaCaches,
   );
 
-  const feasibilityPatch = buildDashboardFeasibilityPatch(data, model);
-  patchWorksheetValues(zip, paths.get("AUTO GENERATED FEASIBILITY"), feasibilityPatch.values);
-  patchWorksheetFormulas(zip, paths.get("AUTO GENERATED FEASIBILITY"), feasibilityPatch.formulas);
+  // The attached feasibility workbook owns every formula in this sheet.
+  // Synchronize only its genuine editable assumption cells; never recreate or
+  // substitute the workbook's financial calculations from dashboard logic.
+  patchWorksheetValues(
+    zip,
+    paths.get("AUTO GENERATED FEASIBILITY"),
+    buildTemplateFeasibilityInputValues(data, model),
+  );
   refreshWorksheetFormulaCaches(
     zip,
     paths.get("AUTO GENERATED FEASIBILITY"),
     { A1: data?.project?.locationArea ?? "" },
   );
-  removeOrphanSharedFormulaReferences(zip, paths.get("AUTO GENERATED FEASIBILITY"));
   hideWorksheetRows(zip, paths.get("AUTO GENERATED FEASIBILITY"), [66, 67]);
 
   // Excel output only: remove source signature drawings from the first two

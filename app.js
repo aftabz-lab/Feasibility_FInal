@@ -20,7 +20,7 @@ import {
   loadOutletLocations,
   outletsWithinRadius,
 } from "./geo-outlets.js?v=feasibility-google-map-location-v21";
-import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-excel-content-repair-v19";
+import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-template-rules-v22";
 import { downloadFeasibilityPdf, downloadManagementFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-edited-rules-zone-count-v18";
 
 const app = document.querySelector("#app");
