@@ -9,11 +9,23 @@ export const LOCATION_ASSESSMENT_RULES = Object.freeze({
   supportRoadHighways: Object.freeze(["unclassified", "residential", "service", "living_street", "road"]),
 });
 
+// Public Overpass servers with worldwide data (OpenStreetMap wiki, 2026).
+// overpass.kumi.systems was renamed to overpass.private.coffee, and the main
+// overpass-api.de server is overloaded, so it is asked last.
 const OVERPASS_ENDPOINTS = Object.freeze([
-  "https://overpass-api.de/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter",
   "https://overpass.private.coffee/api/interpreter",
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+  "https://overpass-api.de/api/interpreter",
 ]);
+// If a server has not answered within the stagger, the next server is asked as
+// well and the first complete answer wins, so one slow server cannot stall the
+// nearby assessment.
+const OVERPASS_STAGGER_MS = 5000;
+const OVERPASS_REQUEST_TIMEOUT_MS = 30000;
+// Overpass asks clients to pause about 30 seconds after a refusal such as 429.
+const OVERPASS_COOLDOWN_MS = 30000;
+const overpassCooldownUntil = new Map();
+const nearbyAssessmentCache = new Map();
 
 function validCoordinate(lat, lon) {
   return Number.isFinite(lat)
@@ -197,17 +209,62 @@ function isDrivableRoad(tags) {
     || LOCATION_ASSESSMENT_RULES.supportRoadHighways.includes(highway);
 }
 
+function localMetres(origin, point) {
+  const radians = Math.PI / 180;
+  const earthRadiusM = 6371008.8;
+  return {
+    x: (Number(point.lon) - Number(origin.lon)) * radians * earthRadiusM * Math.cos(Number(origin.lat) * radians),
+    y: (Number(point.lat) - Number(origin.lat)) * radians * earthRadiusM,
+  };
+}
+
+function segmentDistanceKm(target, start, end) {
+  const a = localMetres(target, start);
+  const b = localMetres(target, end);
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const lengthSquared = dx * dx + dy * dy;
+  const position = lengthSquared > 0
+    ? Math.min(1, Math.max(0, -(a.x * dx + a.y * dy) / lengthSquared))
+    : 0;
+  return Math.hypot(a.x + position * dx, a.y + position * dy) / 1000;
+}
+
+// Distance from the location to the closest point of the mapped road line. The
+// centre point of a long main road can be hundreds of metres away, so the road
+// geometry is used whenever the map server returns it.
+function roadDistanceKm(target, element) {
+  let nearestKm = Infinity;
+  let previous = null;
+  (Array.isArray(element?.geometry) ? element.geometry : []).forEach((point) => {
+    const lat = Number(point?.lat);
+    const lon = Number(point?.lon);
+    const current = point && Number.isFinite(lat) && Number.isFinite(lon) ? { lat, lon } : null;
+    if (current) {
+      nearestKm = Math.min(
+        nearestKm,
+        previous ? segmentDistanceKm(target, previous, current) : haversineKm(target, current),
+      );
+    }
+    previous = current;
+  });
+  if (Number.isFinite(nearestKm)) return nearestKm;
+  const coordinate = featureCoordinate(element);
+  return coordinate ? haversineKm(target, coordinate) : null;
+}
+
 function classifyRoad(elements, target) {
-  const roads = (elements || [])
-    .filter((element) => isDrivableRoad(element?.tags || {}))
+  const drivable = (elements || []).filter((element) => isDrivableRoad(element?.tags || {}));
+  // Roads come from the road query with their full line. Drivable-tagged features
+  // returned by the 1 KM facility query only carry a centre point, so they are not
+  // used as roads when the road query has supplied lines.
+  const withGeometry = drivable.filter((element) => Array.isArray(element?.geometry) && element.geometry.length);
+  const roadRadiusKm = (LOCATION_ASSESSMENT_RULES.roadRadiusM + 5) / 1000;
+  const roads = (withGeometry.length ? withGeometry : drivable)
     .map((element) => {
-      const coordinate = featureCoordinate(element);
-      if (!coordinate) return null;
-      return {
-        element,
-        coordinate,
-        distanceKm: haversineKm(target, coordinate),
-      };
+      const distanceKm = roadDistanceKm(target, element);
+      if (!Number.isFinite(distanceKm) || distanceKm > roadRadiusKm) return null;
+      return { element, distanceKm };
     })
     .filter(Boolean)
     .sort((left, right) => left.distanceKm - right.distanceKm);
@@ -248,66 +305,127 @@ function buildOverpassQuery(target) {
   const lon = Number(target.lon).toFixed(7);
   const roadRadius = LOCATION_ASSESSMENT_RULES.roadRadiusM;
   const poiRadius = LOCATION_ASSESSMENT_RULES.poiRadiusM;
+  // Roads keep their line geometry so the nearest road is measured to the road
+  // itself. Facilities are returned one by one (not as server totals) so each
+  // count follows the "count distinct mapped features" rule.
   return `[out:json][timeout:25];
 way(around:${roadRadius},${lat},${lon})["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|service|living_street|road)(_link)?$"];
-out tags center;
+out geom;
 (
-  nwr(around:${poiRadius},${lat},${lon})["amenity"="place_of_worship"];
+  nwr(around:${poiRadius},${lat},${lon})["amenity"~"^(place_of_worship|school|college|university|bank|atm|bus_station|taxi|restaurant|hospital)$"];
   nwr(around:${poiRadius},${lat},${lon})["building"~"^(mosque|temple|church)$"];
-);
-out count;
-nwr(around:${poiRadius},${lat},${lon})["amenity"~"^(school|college|university)$"];
-out count;
-(
-  nwr(around:${poiRadius},${lat},${lon})["amenity"~"^(bank|atm)$"];
   nwr(around:${poiRadius},${lat},${lon})["office"];
-);
-out count;
-(
-  nwr(around:${poiRadius},${lat},${lon})["amenity"~"^(bus_station|taxi)$"];
+  nwr(around:${poiRadius},${lat},${lon})["tourism"="hotel"];
+  nwr(around:${poiRadius},${lat},${lon})["club"];
   nwr(around:${poiRadius},${lat},${lon})["public_transport"];
   nwr(around:${poiRadius},${lat},${lon})["highway"="bus_stop"];
   nwr(around:${poiRadius},${lat},${lon})["railway"~"^(station|halt|tram_stop)$"];
   nwr(around:${poiRadius},${lat},${lon})["fuel:cng"="yes"];
 );
-out count;
-(
-  nwr(around:${poiRadius},${lat},${lon})["tourism"="hotel"];
-  nwr(around:${poiRadius},${lat},${lon})["amenity"~"^(restaurant|hospital)$"];
-  nwr(around:${poiRadius},${lat},${lon})["club"];
-);
-out count;`;
+out tags center;`;
 }
 
-async function fetchOverpassElements(target, fetchImpl) {
-  const body = new URLSearchParams({ data: buildOverpassQuery(target) }).toString();
-  let lastError = null;
-  for (const endpoint of OVERPASS_ENDPOINTS) {
-    try {
-      const response = await fetchWithTimeout(fetchImpl, endpoint, {
-        method: "POST",
-        headers: {
-          "Accept": "application/json",
-          "Accept-Language": "en",
-          "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-        },
-        body,
-      }, 35000);
-      if (!response.ok) {
-        lastError = new Error(`Map service returned ${response.status}.`);
-        continue;
-      }
-      const payload = await response.json();
-      if (!Array.isArray(payload?.elements)) {
-        lastError = new Error("Map service returned an invalid result.");
-        continue;
-      }
-      return payload.elements;
-    } catch (error) {
-      lastError = error;
-    }
+function overpassHost(endpoint) {
+  try {
+    return new URL(endpoint).hostname;
+  } catch {
+    return String(endpoint);
   }
-  throw new Error(`Nearby map assessment is unavailable${lastError?.message ? `: ${lastError.message}` : "."}`);
+}
+
+async function requestOverpassElements(fetchImpl, endpoint, body, signal) {
+  const response = await fetchImpl(endpoint, {
+    method: "POST",
+    headers: {
+      "Accept": "application/json",
+      "Accept-Language": "en",
+      "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+    },
+    body,
+    signal,
+  });
+  if (!response.ok) {
+    const error = new Error(`returned ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+  let payload;
+  try {
+    payload = await response.json();
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw new Error("returned an unreadable reply");
+  }
+  // A server that runs out of time or memory still answers 200 with partial data,
+  // which would undercount nearby facilities, so that answer is rejected.
+  const remark = String(payload?.remark || "");
+  if (/error/i.test(remark)) throw new Error(`stopped early (${remark.slice(0, 120)})`);
+  if (!Array.isArray(payload?.elements)) throw new Error("returned an invalid result");
+  return payload.elements;
+}
+
+function fetchOverpassElements(target, fetchImpl) {
+  const body = new URLSearchParams({ data: buildOverpassQuery(target) }).toString();
+  const now = Date.now();
+  const rested = OVERPASS_ENDPOINTS.filter((endpoint) => (overpassCooldownUntil.get(endpoint) || 0) <= now);
+  const endpoints = rested.length ? rested : [...OVERPASS_ENDPOINTS];
+  return new Promise((resolve, reject) => {
+    const controllers = new Set();
+    const failures = [];
+    let nextIndex = 0;
+    let running = 0;
+    let settled = false;
+    let staggerTimer = null;
+
+    const settle = (handler, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(staggerTimer);
+      controllers.forEach((controller) => controller.abort());
+      controllers.clear();
+      handler(value);
+    };
+
+    const launchNext = () => {
+      clearTimeout(staggerTimer);
+      if (settled || nextIndex >= endpoints.length) return;
+      const endpoint = endpoints[nextIndex];
+      nextIndex += 1;
+      const controller = new AbortController();
+      let timedOut = false;
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, OVERPASS_REQUEST_TIMEOUT_MS);
+      controllers.add(controller);
+      running += 1;
+      requestOverpassElements(fetchImpl, endpoint, body, controller.signal)
+        .then((elements) => {
+          overpassCooldownUntil.delete(endpoint);
+          settle(resolve, elements);
+        })
+        .catch((error) => {
+          if (settled) return;
+          if ([406, 429, 503, 504].includes(error?.status)) {
+            overpassCooldownUntil.set(endpoint, Date.now() + OVERPASS_COOLDOWN_MS);
+          }
+          failures.push(`${overpassHost(endpoint)} ${timedOut ? "timed out" : error?.message || "failed"}`);
+          // This server has failed, so ask the next one now rather than after the stagger.
+          launchNext();
+        })
+        .finally(() => {
+          clearTimeout(timeout);
+          controllers.delete(controller);
+          running -= 1;
+          if (!settled && running === 0 && nextIndex >= endpoints.length) {
+            settle(reject, new Error(`Nearby map assessment is unavailable (${failures.join("; ")}).`));
+          }
+        });
+      if (nextIndex < endpoints.length) staggerTimer = setTimeout(launchNext, OVERPASS_STAGGER_MS);
+    };
+
+    launchNext();
+  });
 }
 
 export function classifyLocationEnvironment(elements, target) {
@@ -364,8 +482,25 @@ export function classifyLocationEnvironment(elements, target) {
 }
 
 export async function assessLocationEnvironment(target, fetchImpl = fetch) {
-  const elements = await fetchOverpassElements(target, fetchImpl);
-  return classifyLocationEnvironment(elements, target);
+  const lat = Number(target?.lat);
+  const lon = Number(target?.lon);
+  if (!validCoordinate(lat, lon)) {
+    throw new Error("A valid mapped location is required for the nearby assessment.");
+  }
+  // Re-selecting the district, toggling the 1 KM outlet option or pressing Recheck
+  // map reuses the same check for the same point instead of queueing duplicate
+  // map queries. A failed check is forgotten so the next attempt asks again.
+  const key = `${lat.toFixed(6)},${lon.toFixed(6)}`;
+  let pending = nearbyAssessmentCache.get(key);
+  if (!pending) {
+    pending = fetchOverpassElements({ lat, lon }, fetchImpl)
+      .then((elements) => classifyLocationEnvironment(elements, { lat, lon }));
+    nearbyAssessmentCache.set(key, pending);
+    pending.catch(() => {
+      if (nearbyAssessmentCache.get(key) === pending) nearbyAssessmentCache.delete(key);
+    });
+  }
+  return { ...(await pending) };
 }
 
 async function geocodeWithNominatim(query, district, fetchImpl) {

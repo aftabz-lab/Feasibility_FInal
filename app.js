@@ -20,7 +20,7 @@ import {
   isGoogleMapsLink,
   loadOutletLocations,
   outletsWithinRadius,
-} from "./geo-outlets.js?v=feasibility-map-assessment-v25";
+} from "./geo-outlets.js?v=feasibility-map-assessment-v26";
 import { assessGoogleMapLocation, resolveGoogleMapsLink } from "./map-link-resolver.js?v=feasibility-map-assessment-v25";
 import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-template-rules-v22";
 import { downloadFeasibilityPdf, downloadManagementFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-edited-rules-zone-count-v18";
@@ -288,13 +288,16 @@ async function refreshLocationIntelligence() {
     let assessment = null;
     let assessmentError = null;
     try {
-      assessment = await assessGoogleMapLocation(target);
-    } catch (resolverError) {
+      // The dashboard's own map rules run first across several public map servers.
+      // The Apps Script assessment is only a fallback, so a slow or outdated script
+      // deployment can no longer hold back the forecasting selections.
+      assessment = await assessLocationEnvironment(target);
+    } catch (browserError) {
       try {
-        assessment = await assessLocationEnvironment(target);
-      } catch (browserError) {
+        assessment = await assessGoogleMapLocation(target);
+      } catch (serverError) {
         assessmentError = new Error(
-          `${resolverError?.message || "Server assessment failed."} Browser fallback also failed: ${browserError?.message || "map service unavailable."}`,
+          `${browserError?.message || "Map service unavailable."} Server fallback also failed: ${serverError?.message || "assessment service unavailable."}`,
         );
       }
     }
