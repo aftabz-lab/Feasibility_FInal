@@ -36,16 +36,69 @@ function callbackName() {
   return `__feasibilityMapLink_${Date.now()}_${suffix}`;
 }
 
-function resolveWithJsonp(shortUrl, endpoint, timeoutMs = 15000) {
+function requestUrlFor(shortUrl, endpoint, callback = "") {
+  const requestUrl = new URL(endpoint.toString());
+  requestUrl.searchParams.set("url", shortUrl);
+  if (callback) requestUrl.searchParams.set("callback", callback);
+  else requestUrl.searchParams.delete("callback");
+  requestUrl.searchParams.set("_", String(Date.now()));
+  return requestUrl;
+}
+
+function resolvedLocation(payload, shortUrl) {
+  if (!payload?.ok) {
+    const error = new Error(payload?.error || "The Google Maps link could not be resolved.");
+    error.resolverResponded = true;
+    throw error;
+  }
+  const lat = Number(payload.latitude);
+  const lon = Number(payload.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    const error = new Error("The resolved Google Maps link did not contain coordinates.");
+    error.resolverResponded = true;
+    throw error;
+  }
+  return {
+    lat,
+    lon,
+    label: payload.resolvedUrl || shortUrl,
+    provider: payload.provider || "Google Maps link",
+  };
+}
+
+async function resolveWithFetch(shortUrl, endpoint, timeoutMs = 30000) {
+  if (typeof fetch !== "function") {
+    throw new Error("Browser fetch is unavailable.");
+  }
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const response = await fetch(requestUrlFor(shortUrl, endpoint).toString(), {
+      method: "GET",
+      mode: "cors",
+      credentials: "omit",
+      cache: "no-store",
+      redirect: "follow",
+      referrerPolicy: "no-referrer",
+      signal: controller?.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`Google Map resolver returned HTTP ${response.status}.`);
+    }
+    const payload = await response.json();
+    return resolvedLocation(payload, shortUrl);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function resolveWithJsonp(shortUrl, endpoint, timeoutMs = 20000) {
   if (typeof document === "undefined" || !document.head) {
     return Promise.reject(new Error("Google Map link resolution requires a browser."));
   }
   return new Promise((resolve, reject) => {
     const callback = callbackName();
-    const requestUrl = new URL(endpoint.toString());
-    requestUrl.searchParams.set("url", shortUrl);
-    requestUrl.searchParams.set("callback", callback);
-    requestUrl.searchParams.set("_", String(Date.now()));
+    const requestUrl = requestUrlFor(shortUrl, endpoint, callback);
 
     const script = document.createElement("script");
     let settled = false;
@@ -69,22 +122,11 @@ function resolveWithJsonp(shortUrl, endpoint, timeoutMs = 15000) {
     }, timeoutMs);
 
     globalThis[callback] = (payload) => {
-      if (!payload?.ok) {
-        finish(reject, new Error(payload?.error || "The Google Maps link could not be resolved."));
-        return;
+      try {
+        finish(resolve, resolvedLocation(payload, shortUrl));
+      } catch (error) {
+        finish(reject, error);
       }
-      const lat = Number(payload.latitude);
-      const lon = Number(payload.longitude);
-      if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-        finish(reject, new Error("The resolved Google Maps link did not contain coordinates."));
-        return;
-      }
-      finish(resolve, {
-        lat,
-        lon,
-        label: payload.resolvedUrl || shortUrl,
-        provider: payload.provider || "Google Maps link",
-      });
     };
     script.onerror = () => {
       finish(reject, new Error("The Google Map link resolver is unavailable. Recheck its Apps Script deployment."));
@@ -93,6 +135,23 @@ function resolveWithJsonp(shortUrl, endpoint, timeoutMs = 15000) {
     script.src = requestUrl.toString();
     document.head.appendChild(script);
   });
+}
+
+async function resolveWithBrowserFallback(shortUrl, endpoint) {
+  let fetchError = null;
+  try {
+    return await resolveWithFetch(shortUrl, endpoint);
+  } catch (error) {
+    if (error?.resolverResponded) throw error;
+    fetchError = error;
+  }
+  try {
+    return await resolveWithJsonp(shortUrl, endpoint);
+  } catch (jsonpError) {
+    if (jsonpError?.resolverResponded) throw jsonpError;
+    const cause = jsonpError?.message || fetchError?.message || "The browser blocked the resolver request.";
+    throw new Error(`${cause} Refresh once and, if it continues, allow script.google.com for this dashboard.`);
+  }
 }
 
 export async function resolveGoogleMapsLink(shortUrl) {
@@ -105,7 +164,7 @@ export async function resolveGoogleMapsLink(shortUrl) {
     throw new Error("Google Maps short-link resolver is not configured. Install the supplied Apps Script resolver once.");
   }
   const endpoint = validatedResolverUrl(endpointValue);
-  const pending = resolveWithJsonp(value, endpoint).catch((error) => {
+  const pending = resolveWithBrowserFallback(value, endpoint).catch((error) => {
     resolverCache.delete(value);
     throw error;
   });
