@@ -59,6 +59,22 @@ export function parseLocationCoordinates(value) {
   return null;
 }
 
+export function isGoogleMapsLink(value) {
+  let url;
+  try {
+    const text = String(value || "").trim();
+    url = new URL(/^https?:\/\//i.test(text) ? text : `https://${text}`);
+  } catch {
+    return false;
+  }
+  const host = url.hostname.toLowerCase().replace(/^www\./, "");
+  return host === "maps.app.goo.gl"
+    || host === "maps.google.com"
+    || host === "google.com" && url.pathname.startsWith("/maps")
+    || host === "goo.gl" && url.pathname.startsWith("/maps/")
+    || host === "g.page";
+}
+
 function normalizeDistrict(value) {
   return String(value || "")
     .toLowerCase()
@@ -354,13 +370,30 @@ async function geocodeWithPhoton(query, district, fetchImpl) {
   return { lat, lon, label: match?.properties?.name || query, provider: "Photon" };
 }
 
-export async function geocodeLocationArea(googleMapLocation, district, fetchImpl = fetch) {
+export async function geocodeLocationArea(googleMapLocation, district, fetchImpl = fetch, mapLinkResolver = null) {
   const direct = parseLocationCoordinates(googleMapLocation);
   if (direct) return { ...direct, label: "entered coordinates", provider: "coordinates" };
 
   const address = String(googleMapLocation || "").trim();
   if (!address) throw new Error("Enter Google Map Location first.");
   if (!String(district || "").trim()) throw new Error("Select District first.");
+  if (isGoogleMapsLink(address)) {
+    if (typeof mapLinkResolver !== "function") {
+      throw new Error("Google Maps short-link resolution is unavailable.");
+    }
+    const resolved = await mapLinkResolver(address);
+    const lat = Number(resolved?.lat);
+    const lon = Number(resolved?.lon);
+    if (!validCoordinate(lat, lon)) {
+      throw new Error("The Google Maps link resolved outside Bangladesh or did not contain valid coordinates.");
+    }
+    return {
+      lat,
+      lon,
+      label: resolved.label || address,
+      provider: resolved.provider || "Google Maps link",
+    };
+  }
   const addressParts = address.split(/[,\n]+/).map((part) => part.trim()).filter(Boolean);
   const simplified = addressParts.filter((part) => !/(?:house|holding|flat|floor|apartment|\broad\s*no\b|\bplot\s*no\b|\b\d{4}\b)/i.test(part));
   const queries = [...new Set([

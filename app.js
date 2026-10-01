@@ -17,9 +17,11 @@ import {
 import {
   assessLocationEnvironment,
   geocodeLocationArea,
+  isGoogleMapsLink,
   loadOutletLocations,
   outletsWithinRadius,
-} from "./geo-outlets.js?v=feasibility-google-map-location-v21";
+} from "./geo-outlets.js?v=feasibility-map-link-resolver-v23";
+import { resolveGoogleMapsLink } from "./map-link-resolver.js?v=feasibility-map-link-resolver-v23";
 import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-template-rules-v22";
 import { downloadFeasibilityPdf, downloadManagementFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-edited-rules-zone-count-v18";
 
@@ -251,17 +253,30 @@ async function refreshLocationIntelligence() {
     return;
   }
   clearAutomaticLocationAssessment();
+  const resolvingGoogleMapsLink = isGoogleMapsLink(state.data.project.googleMapLocation);
   locationLookupMessage(
     state.data.project.includeExistingOutlets === true ? "loading" : "off",
     state.data.project.includeExistingOutlets === true
-      ? "Checking Google Map Location against outlet map points in the selected district…"
+      ? resolvingGoogleMapsLink
+        ? "Resolving the Google Maps link, then checking outlet map points in the selected district…"
+        : "Checking Google Map Location against outlet map points in the selected district…"
       : "Automatic 1 KM outlet count is excluded from Excel and PDFs; the location assessment will still run.",
   );
-  locationAssessmentMessage("loading", "Checking mapped roads and facilities around the entered location…");
+  locationAssessmentMessage(
+    "loading",
+    resolvingGoogleMapsLink
+      ? "Resolving the Google Maps link in the background before checking nearby roads and facilities…"
+      : "Checking mapped roads and facilities around the entered location…",
+  );
   recalculate();
   render();
   try {
-    const target = await geocodeLocationArea(state.data.project.googleMapLocation, state.data.project.district);
+    const target = await geocodeLocationArea(
+      state.data.project.googleMapLocation,
+      state.data.project.district,
+      fetch,
+      resolveGoogleMapsLink,
+    );
     if (token !== locationLookupToken) return;
     const matches = state.outletLocations.length
       ? outletsWithinRadius(state.outletLocations, target, state.data.project.district, 1)
