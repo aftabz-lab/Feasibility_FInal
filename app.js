@@ -242,6 +242,20 @@ function applyAutomaticLocationAssessment(assessment, target, existingOutletMatc
   };
 }
 
+function firstSuccessfulAssessment(attempts) {
+  return new Promise((resolve, reject) => {
+    const errors = new Array(attempts.length);
+    let pending = attempts.length;
+    attempts.forEach((attempt, index) => {
+      Promise.resolve(attempt).then(resolve, (error) => {
+        errors[index] = error;
+        pending -= 1;
+        if (pending === 0) reject(errors);
+      });
+    });
+  });
+}
+
 async function refreshLocationIntelligence() {
   const token = ++locationLookupToken;
   if (!state.data.project.googleMapLocation || !state.data.project.district) {
@@ -288,18 +302,19 @@ async function refreshLocationIntelligence() {
     let assessment = null;
     let assessmentError = null;
     try {
-      // The dashboard's own map rules run first across several public map servers.
-      // The Apps Script assessment is only a fallback, so a slow or outdated script
-      // deployment can no longer hold back the forecasting selections.
-      assessment = await assessLocationEnvironment(target);
-    } catch (browserError) {
-      try {
-        assessment = await assessGoogleMapLocation(target);
-      } catch (serverError) {
-        assessmentError = new Error(
-          `${browserError?.message || "Map service unavailable."} Server fallback also failed: ${serverError?.message || "assessment service unavailable."}`,
-        );
-      }
+      // Two routes start together and apply the same map rules: the browser asks the
+      // public map servers directly, and the Apps Script asks them from Google's
+      // servers. The first complete answer is used, so a network that blocks or
+      // slows one route can no longer leave the forecasting selections blank.
+      assessment = await firstSuccessfulAssessment([
+        assessLocationEnvironment(target),
+        assessGoogleMapLocation(target),
+      ]);
+    } catch (failures) {
+      const [browserError, serverError] = Array.isArray(failures) ? failures : [failures];
+      assessmentError = new Error(
+        `${browserError?.message || "Map service unavailable."} Apps Script route also failed: ${serverError?.message || "assessment service unavailable."}`,
+      );
     }
     if (token !== locationLookupToken) return;
 
