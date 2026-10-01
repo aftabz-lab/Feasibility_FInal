@@ -229,6 +229,8 @@ function applyAutomaticLocationAssessment(assessment, target, existingOutletMatc
     existingOutletMatches: existingOutletMatches.map((outlet) => ({
       code: outlet.code,
       name: outlet.name,
+      rho: outlet.rho,
+      zonal: outlet.zonal,
       district: outlet.district,
       lat: outlet.lat,
       lon: outlet.lon,
@@ -737,12 +739,19 @@ function renderForecast() {
   const { model, data } = state;
   const rows = model.forecastScore.rows.map((row, index) => `<tr><td>${index + 1}</td><td>${escapeHtml(row.label)}</td><td>${formatPercent(row.weight, 0)}</td><td>${escapeHtml(String(row.answer))}</td><td>${row.mark}</td><td>${roundUpWhole(row.mark * row.weight)}%</td></tr>`).join("");
   const categories = model.categories.map((category) => `<tr><td>${escapeHtml(category.name)}</td><td>${formatPercent(category.mix, 1)}</td><td>৳ ${formatMoney(category.perDaySales)}</td><td>৳ ${formatMoney(category.monthlySales)}</td></tr>`).join("");
+  const nearbyOutlets = Array.isArray(data.locationAssessment?.existingOutletMatches)
+    ? data.locationAssessment.existingOutletMatches
+    : [];
+  const nearbyOutletTable = nearbyOutlets.length
+    ? `<article class="panel nearby-outlet-panel"><div class="panel-heading"><div><p class="eyebrow">Existing Outlet No. within 1 KM</p><h3>Nearby outlet list</h3></div><span class="nearby-outlet-count">${nearbyOutlets.length} outlet${nearbyOutlets.length === 1 ? "" : "s"}</span></div><div class="table-scroll"><table class="report-table nearby-outlet-table" aria-label="Existing outlets within 1 KM"><thead><tr><th scope="col">Outlet code</th><th scope="col">Outlet name</th><th scope="col">RHO</th><th scope="col">Zonal</th></tr></thead><tbody>${nearbyOutlets.map((outlet) => `<tr><td>${escapeHtml(outlet.code || "—")}</td><td>${escapeHtml(outlet.name || "—")}</td><td>${escapeHtml(outlet.rho || "—")}</td><td>${escapeHtml(outlet.zonal || "—")}</td></tr>`).join("")}</tbody></table></div></article>`
+    : "";
   return `<section class="page">
     <div class="page-title-row"><div><p class="eyebrow">Sales Forecasting Tools</p><h2>Forecast score & category mix</h2><p class="page-subtitle">The interactive version of the source forecast sheet.</p></div><div class="score-callout"><span>Final score</span><strong>${roundUpWhole(model.forecastScore.total)}%</strong></div></div>
     <div class="split-report">
       <article class="panel"><div class="panel-heading"><div><p class="eyebrow">Location assessment</p><h3>Weighted score card</h3></div></div><div class="table-scroll"><table class="report-table"><thead><tr><th>SL</th><th>Description</th><th>Weight</th><th>Answer</th><th>Mark</th><th>Achievement</th></tr></thead><tbody>${rows}<tr class="total-row"><td></td><td>Overall Forecasting Score</td><td>100%</td><td></td><td></td><td>${roundUpWhole(model.forecastScore.total)}%</td></tr></tbody></table></div></article>
       <article class="panel"><div class="panel-heading"><div><p class="eyebrow">Sales composition</p><h3>Category-wise projection</h3></div></div><div class="table-scroll"><table class="report-table"><thead><tr><th>Category</th><th>Mix</th><th>Per Day</th><th>Monthly</th></tr></thead><tbody>${categories}<tr class="total-row"><td>Total</td><td>100.0%</td><td>৳ ${formatMoney(model.inputs.dailySales)}</td><td>৳ ${formatMoney(model.inputs.monthlySales)}</td></tr></tbody></table></div></article>
     </div>
+    ${nearbyOutletTable}
     <article class="panel reference-panel"><div class="panel-heading"><div><p class="eyebrow">Workbook reference</p><h3>Auto calculation key</h3></div></div><div class="facts-grid"><div><span>Lookup key</span><strong>${escapeHtml(model.key)}</strong></div><div><span>GP%</span><strong>${formatPercent(model.inputs.gpPercent, 2)}</strong></div><div><span>Dhaka / Out of Dhaka</span><strong>${escapeHtml(model.dhakaClassification)} (${escapeHtml(model.inputs.areaOutsideDhaka)})</strong></div><div><span>Basket size</span><strong>${formatMoney(model.inputs.basketSize, 1)}</strong></div><div><span>Sales reference</span><strong>৳ ${formatMoney(data.reference.referenceSalesPerDay)}</strong></div></div></article>
   </section>`;
 }
