@@ -349,6 +349,7 @@ export const defaultData = {
   },
   project: {
     locationArea: "",
+    googleMapLocation: "",
     district: "",
     // Choice fields deliberately start empty. Type in the searchable field,
     // then choose the appropriate option for each new feasibility case.

@@ -13,13 +13,13 @@ import {
   getSignatoryAutoLink,
   openedByOptions,
   salesGivenByOptions,
-} from "./model.mjs?v=feasibility-edited-rules-zone-count-v18";
+} from "./model.mjs?v=feasibility-google-map-location-v21";
 import {
   assessLocationEnvironment,
   geocodeLocationArea,
   loadOutletLocations,
   outletsWithinRadius,
-} from "./geo-outlets.js?v=feasibility-edited-rules-zone-count-v18";
+} from "./geo-outlets.js?v=feasibility-google-map-location-v21";
 import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-excel-content-repair-v19";
 import { downloadFeasibilityPdf, downloadManagementFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-edited-rules-zone-count-v18";
 
@@ -38,13 +38,14 @@ const state = {
   outletLocations: [],
   outletLocationMeta: {},
   locationLookup: { kind: "loading", message: "Loading the zone outlet map…" },
-  locationAssessment: { kind: "waiting", message: "Enter a complete location address and select District for automatic assessment." },
+  locationAssessment: { kind: "waiting", message: "Enter Google Map Location and select District for automatic assessment." },
 };
 
 let locationLookupToken = 0;
 
 const blankInitialSelectionPaths = Object.freeze([
   "project.locationArea",
+  "project.googleMapLocation",
   "project.district",
   "project.division",
   "project.pnp",
@@ -224,7 +225,7 @@ function applyAutomaticLocationAssessment(assessment, target, existingOutletMatc
   state.data.forecast.hotelRestaurantHospitalCount = assessment.hotelRestaurantHospitalCount;
   state.data.locationAssessment = {
     ...assessment,
-    targetLabel: target.label || state.data.project.locationArea,
+    targetLabel: target.label || state.data.project.googleMapLocation,
     geocoder: target.provider || "",
     existingOutletMatches: existingOutletMatches.map((outlet) => ({
       code: outlet.code,
@@ -241,10 +242,10 @@ function applyAutomaticLocationAssessment(assessment, target, existingOutletMatc
 
 async function refreshLocationIntelligence() {
   const token = ++locationLookupToken;
-  if (!state.data.project.locationArea || !state.data.project.district) {
+  if (!state.data.project.googleMapLocation || !state.data.project.district) {
     clearAutomaticLocationAssessment();
-    locationLookupMessage("waiting", "Enter a complete location address and select District to calculate the 1 KM count.");
-    locationAssessmentMessage("waiting", "Enter a complete location address and select District for automatic assessment.");
+    locationLookupMessage("waiting", "Enter Google Map Location and select District to calculate the 1 KM count.");
+    locationAssessmentMessage("waiting", "Enter Google Map Location and select District for automatic assessment.");
     recalculate();
     render();
     return;
@@ -253,19 +254,19 @@ async function refreshLocationIntelligence() {
   locationLookupMessage(
     state.data.project.includeExistingOutlets === true ? "loading" : "off",
     state.data.project.includeExistingOutlets === true
-      ? "Checking the address against outlet map points in the selected district…"
+      ? "Checking Google Map Location against outlet map points in the selected district…"
       : "Automatic 1 KM outlet count is excluded from Excel and PDFs; the location assessment will still run.",
   );
   locationAssessmentMessage("loading", "Checking mapped roads and facilities around the entered location…");
   recalculate();
   render();
   try {
-    const target = await geocodeLocationArea(state.data.project.locationArea, state.data.project.district);
+    const target = await geocodeLocationArea(state.data.project.googleMapLocation, state.data.project.district);
     if (token !== locationLookupToken) return;
     const matches = state.outletLocations.length
       ? outletsWithinRadius(state.outletLocations, target, state.data.project.district, 1)
       : [];
-    if (state.data.project.includeExistingOutlets === true && state.outletLocations.length) {
+    if (state.outletLocations.length) {
       state.data.project.existingOutlets = matches.length;
     }
 
@@ -289,7 +290,7 @@ async function refreshLocationIntelligence() {
       state.data.locationAssessment = {
         latitude: Number(target.lat),
         longitude: Number(target.lon),
-        targetLabel: target.label || state.data.project.locationArea,
+        targetLabel: target.label || state.data.project.googleMapLocation,
         geocoder: target.provider || "",
         existingOutletMatches: matches,
       };
@@ -502,12 +503,12 @@ function existingOutletLookupHtml() {
   const suffix = mappedCount > 0 && lookup.kind !== "ready"
     ? ` Zone dashboard reference: ${formatMoney(mappedCount, 0)} mapped outlets.`
     : "";
-  return `<p class="location-lookup-note location-lookup-${escapeHtml(lookup.kind || "waiting")}">${escapeHtml(lookup.message || "Enter a location and select District to calculate the 1 KM count.")}${escapeHtml(suffix)}</p>`;
+  return `<p class="location-lookup-note location-lookup-${escapeHtml(lookup.kind || "waiting")}">${escapeHtml(lookup.message || "Enter Google Map Location and select District to calculate the 1 KM count.")}${escapeHtml(suffix)}</p>`;
 }
 
 function locationAssessmentHtml() {
   const assessment = state.locationAssessment || {};
-  return `<p class="location-lookup-note location-lookup-${escapeHtml(assessment.kind || "waiting")}">${escapeHtml(assessment.message || "Enter a location and select District for automatic assessment.")} <button class="text-button" type="button" data-action="refresh-location-assessment">Recheck map</button></p>`;
+  return `<p class="location-lookup-note location-lookup-${escapeHtml(assessment.kind || "waiting")}">${escapeHtml(assessment.message || "Enter Google Map Location and select District for automatic assessment.")} <button class="text-button" type="button" data-action="refresh-location-assessment">Recheck map</button></p>`;
 }
 
 function automaticAssessmentValue(value, labels = null) {
@@ -643,6 +644,7 @@ function renderDataEntry() {
           ${textField("Advance", "project.advance", { type: "number", min: 0, step: 1 })}
           ${textField("Outbound Transport / Month", "project.outboundTransport", { type: "number", min: 0, step: 1, hint: outboundTransportHint() })}
           ${optionalExportNumberField("Existing Outlet No. within 1 KM", "project.existingOutlets", "project.includeExistingOutlets", { min: 0, step: 1 })}
+          ${textField("Google Map Location", "project.googleMapLocation", { placeholder: "Paste Google Maps link, coordinates or address", hint: "Used for 1 KM count and map assessment" })}
           ${existingOutletLookupHtml()}
         </div>`)}
         ${sectionCard("GP controls", "Enter a whole percentage: 16 means 16%. You may also use the prior decimal style, such as 0.16. Leave either manual field blank to retain the automatic calculation.", `<div class="override-grid">
@@ -654,7 +656,7 @@ function renderDataEntry() {
           ${selectField("Opened by", "project.openedBy", openedByOptions, { labelFn: (item) => item.name, valueFn: (item) => item.name, freeText: true, placeholder: "Search or type a name" })}
           ${textField("Opened by Designation", "project.openedDesignation", { placeholder: "Type the designation" })}
         </div>`)}
-        ${sectionCard("Sales forecasting assessment", "Road type, nearby facility counts, transport and signboard visibility are selected automatically from the entered location. Long-feet remains a user input above.", `<div class="field-grid two">
+        ${sectionCard("Sales forecasting assessment", "Road type, nearby facility counts, transport and signboard visibility are selected automatically from Google Map Location. Long-feet remains a user input above.", `<div class="field-grid two">
           ${textField("Avg. Sales of Departmental Stores / Competitor Store", "forecast.avgDepartmentalSales", { type: "number", min: 0, step: 1 })}
           ${automaticField("Road Status", automaticAssessmentValue(data.forecast.roadStatus, { M: "Main road", S: "Support road", B: "No mapped road" }), "Nearest mapped drivable road within 150 m")}
           ${automaticField("Mosque / Mandir / Girza", automaticAssessmentValue(data.forecast.worshipCount), "Mapped facilities within 1 KM")}
@@ -1111,7 +1113,7 @@ function applyChange(target) {
     }
     : { kind: "ready", message: "Inputs updated. All report values refreshed." };
   render();
-  if (path === "project.locationArea" || path === "project.includeExistingOutlets") {
+  if (path === "project.googleMapLocation" || path === "project.includeExistingOutlets") {
     void refreshLocationIntelligence();
   }
 }
@@ -1145,8 +1147,8 @@ async function loadWorkbookFromBuffer(buffer, sourceName) {
   }
   const workbook = XLSX.read(buffer, { type: "array", cellFormula: true, cellStyles: false, cellNF: true });
   state.data = extractFromWorkbook(workbook, sourceName);
-  state.locationAssessment = { kind: "waiting", message: "Enter a complete location address and select District for automatic assessment." };
-  state.locationLookup = { kind: "waiting", message: "Enter a complete location address and select District to calculate the 1 KM count." };
+  state.locationAssessment = { kind: "waiting", message: "Enter Google Map Location and select District for automatic assessment." };
+  state.locationLookup = { kind: "waiting", message: "Enter Google Map Location and select District to calculate the 1 KM count." };
   state.firstFeasibilityEntry = null;
   recalculate();
 }
@@ -1191,7 +1193,7 @@ async function loadZoneOutletMap() {
     state.outletLocationMeta = result.meta;
     locationLookupMessage(
       "waiting",
-      "Enter a complete location address and select District to calculate the 1 KM count.",
+      "Enter Google Map Location and select District to calculate the 1 KM count.",
     );
   } catch (error) {
     state.outletLocations = [];
@@ -1372,8 +1374,8 @@ app.addEventListener("click", (event) => {
   if (actionName === "reset") {
     state.data = cloneData(defaultData);
     state.firstFeasibilityEntry = null;
-    locationLookupMessage("waiting", "Enter a complete location address and select District to calculate the 1 KM count.");
-    locationAssessmentMessage("waiting", "Enter a complete location address and select District for automatic assessment.");
+    locationLookupMessage("waiting", "Enter Google Map Location and select District to calculate the 1 KM count.");
+    locationAssessmentMessage("waiting", "Enter Google Map Location and select District for automatic assessment.");
     recalculate();
     state.status = { kind: "ready", message: "Built-in baseline restored." };
     render();

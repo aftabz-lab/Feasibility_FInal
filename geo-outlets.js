@@ -354,12 +354,12 @@ async function geocodeWithPhoton(query, district, fetchImpl) {
   return { lat, lon, label: match?.properties?.name || query, provider: "Photon" };
 }
 
-export async function geocodeLocationArea(locationArea, district, fetchImpl = fetch) {
-  const direct = parseLocationCoordinates(locationArea);
+export async function geocodeLocationArea(googleMapLocation, district, fetchImpl = fetch) {
+  const direct = parseLocationCoordinates(googleMapLocation);
   if (direct) return { ...direct, label: "entered coordinates", provider: "coordinates" };
 
-  const address = String(locationArea || "").trim();
-  if (!address) throw new Error("Enter Location Area first.");
+  const address = String(googleMapLocation || "").trim();
+  if (!address) throw new Error("Enter Google Map Location first.");
   if (!String(district || "").trim()) throw new Error("Select District first.");
   const addressParts = address.split(/[,\n]+/).map((part) => part.trim()).filter(Boolean);
   const simplified = addressParts.filter((part) => !/(?:house|holding|flat|floor|apartment|\broad\s*no\b|\bplot\s*no\b|\b\d{4}\b)/i.test(part));
@@ -377,5 +377,5 @@ export async function geocodeLocationArea(locationArea, district, fetchImpl = fe
     const result = attempts.find((attempt) => attempt.status === "fulfilled" && attempt.value)?.value;
     if (result) return result;
   }
-  throw new Error("Location could not be mapped. Enter a fuller address or paste latitude, longitude.");
+  throw new Error("Google Map Location could not be mapped. Enter a fuller address or paste latitude, longitude.");
 }
