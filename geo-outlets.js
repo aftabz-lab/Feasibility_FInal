@@ -12,6 +12,7 @@ export const LOCATION_ASSESSMENT_RULES = Object.freeze({
 const OVERPASS_ENDPOINTS = Object.freeze([
   "https://overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
 ]);
 
 function validCoordinate(lat, lon) {
@@ -228,25 +229,54 @@ function classifyRoad(elements, target) {
   };
 }
 
+function summarizedNearbyCounts(elements) {
+  const counts = (elements || [])
+    .filter((element) => element?.type === "count")
+    .map((element) => Number(element?.tags?.total));
+  if (counts.length < 5 || counts.slice(0, 5).some((value) => !Number.isFinite(value))) return null;
+  return {
+    worshipCount: counts[0],
+    educationCount: counts[1],
+    bankOfficeCount: counts[2],
+    transitCount: counts[3],
+    hotelRestaurantHospitalCount: counts[4],
+  };
+}
+
 function buildOverpassQuery(target) {
   const lat = Number(target.lat).toFixed(7);
   const lon = Number(target.lon).toFixed(7);
   const roadRadius = LOCATION_ASSESSMENT_RULES.roadRadiusM;
   const poiRadius = LOCATION_ASSESSMENT_RULES.poiRadiusM;
-  return `[out:json][timeout:18];
+  return `[out:json][timeout:25];
+way(around:${roadRadius},${lat},${lon})["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|service|living_street|road)(_link)?$"];
+out tags center;
 (
-  way(around:${roadRadius},${lat},${lon})["highway"];
-  nwr(around:${poiRadius},${lat},${lon})["amenity"~"^(place_of_worship|school|college|university|bank|atm|bus_station|taxi|restaurant|hospital)$"];
+  nwr(around:${poiRadius},${lat},${lon})["amenity"="place_of_worship"];
   nwr(around:${poiRadius},${lat},${lon})["building"~"^(mosque|temple|church)$"];
+);
+out count;
+nwr(around:${poiRadius},${lat},${lon})["amenity"~"^(school|college|university)$"];
+out count;
+(
+  nwr(around:${poiRadius},${lat},${lon})["amenity"~"^(bank|atm)$"];
   nwr(around:${poiRadius},${lat},${lon})["office"];
-  nwr(around:${poiRadius},${lat},${lon})["tourism"="hotel"];
-  nwr(around:${poiRadius},${lat},${lon})["club"];
+);
+out count;
+(
+  nwr(around:${poiRadius},${lat},${lon})["amenity"~"^(bus_station|taxi)$"];
   nwr(around:${poiRadius},${lat},${lon})["public_transport"];
   nwr(around:${poiRadius},${lat},${lon})["highway"="bus_stop"];
   nwr(around:${poiRadius},${lat},${lon})["railway"~"^(station|halt|tram_stop)$"];
   nwr(around:${poiRadius},${lat},${lon})["fuel:cng"="yes"];
 );
-out tags center;`;
+out count;
+(
+  nwr(around:${poiRadius},${lat},${lon})["tourism"="hotel"];
+  nwr(around:${poiRadius},${lat},${lon})["amenity"~"^(restaurant|hospital)$"];
+  nwr(around:${poiRadius},${lat},${lon})["club"];
+);
+out count;`;
 }
 
 async function fetchOverpassElements(target, fetchImpl) {
@@ -257,11 +287,12 @@ async function fetchOverpassElements(target, fetchImpl) {
       const response = await fetchWithTimeout(fetchImpl, endpoint, {
         method: "POST",
         headers: {
+          "Accept": "application/json",
           "Accept-Language": "en",
           "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
         },
         body,
-      }, 20000);
+      }, 35000);
       if (!response.ok) {
         lastError = new Error(`Map service returned ${response.status}.`);
         continue;
@@ -284,25 +315,26 @@ export function classifyLocationEnvironment(elements, target) {
     throw new Error("A valid mapped location is required for the nearby assessment.");
   }
   const road = classifyRoad(elements, target);
-  const worshipCount = distinctFeatureCount(elements, "worship", (tags) => (
+  const summarized = summarizedNearbyCounts(elements);
+  const worshipCount = summarized?.worshipCount ?? distinctFeatureCount(elements, "worship", (tags) => (
     normalizedTag(tags.amenity) === "place_of_worship"
     || ["mosque", "temple", "church"].includes(normalizedTag(tags.building))
   ));
-  const educationCount = distinctFeatureCount(elements, "education", (tags) => (
+  const educationCount = summarized?.educationCount ?? distinctFeatureCount(elements, "education", (tags) => (
     ["school", "college", "university"].includes(normalizedTag(tags.amenity))
   ));
-  const bankOfficeCount = distinctFeatureCount(elements, "bank-office", (tags) => (
+  const bankOfficeCount = summarized?.bankOfficeCount ?? distinctFeatureCount(elements, "bank-office", (tags) => (
     ["bank", "atm"].includes(normalizedTag(tags.amenity))
     || (Boolean(tags.office) && !["no", "none"].includes(normalizedTag(tags.office)))
   ));
-  const transitCount = distinctFeatureCount(elements, "transit", (tags) => (
+  const transitCount = summarized?.transitCount ?? distinctFeatureCount(elements, "transit", (tags) => (
     ["bus_station", "taxi"].includes(normalizedTag(tags.amenity))
     || normalizedTag(tags.highway) === "bus_stop"
     || Boolean(tags.public_transport)
     || ["station", "halt", "tram_stop"].includes(normalizedTag(tags.railway))
     || normalizedTag(tags["fuel:cng"]) === "yes"
   ));
-  const hotelRestaurantHospitalCount = distinctFeatureCount(elements, "commercial-anchor", (tags) => (
+  const hotelRestaurantHospitalCount = summarized?.hotelRestaurantHospitalCount ?? distinctFeatureCount(elements, "commercial-anchor", (tags) => (
     normalizedTag(tags.tourism) === "hotel"
     || ["restaurant", "hospital"].includes(normalizedTag(tags.amenity))
     || (Boolean(tags.club) && !["no", "none"].includes(normalizedTag(tags.club)))

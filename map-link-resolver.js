@@ -1,4 +1,5 @@
 const resolverCache = new Map();
+const assessmentCache = new Map();
 
 async function configuredResolverUrl() {
   const runtimeValue = String(globalThis.FEASIBILITY_MAP_RESOLVER_URL || "").trim();
@@ -64,6 +65,140 @@ function resolvedLocation(payload, shortUrl) {
     label: payload.resolvedUrl || shortUrl,
     provider: payload.provider || "Google Maps link",
   };
+}
+
+function validBangladeshCoordinate(lat, lon) {
+  return Number.isFinite(lat)
+    && Number.isFinite(lon)
+    && lat >= 20
+    && lat <= 27
+    && lon >= 88
+    && lon <= 93;
+}
+
+function assessmentRequestUrlFor(target, endpoint, callback = "") {
+  const requestUrl = new URL(endpoint.toString());
+  requestUrl.searchParams.set("action", "assess");
+  requestUrl.searchParams.set("latitude", String(Number(target.lat)));
+  requestUrl.searchParams.set("longitude", String(Number(target.lon)));
+  if (callback) requestUrl.searchParams.set("callback", callback);
+  else requestUrl.searchParams.delete("callback");
+  requestUrl.searchParams.set("_", String(Date.now()));
+  return requestUrl;
+}
+
+function resolvedAssessment(payload, target) {
+  if (!payload?.ok) {
+    const error = new Error(payload?.error || "The Google Map assessment could not be completed.");
+    error.resolverResponded = true;
+    throw error;
+  }
+  const assessment = payload.assessment;
+  const roadStatus = String(assessment?.roadStatus || "").toUpperCase();
+  const publicTransit = String(assessment?.publicTransit || "").toUpperCase();
+  const signboardVisibility = String(assessment?.signboardVisibility || "").toUpperCase();
+  if (!assessment
+    || !["M", "S", "B"].includes(roadStatus)
+    || !["Y", "N"].includes(publicTransit)
+    || !["H", "M", "L"].includes(signboardVisibility)) {
+    const error = new Error("The Google Map assessment returned an invalid result.");
+    error.resolverResponded = true;
+    throw error;
+  }
+  const count = (value) => Math.max(0, Math.round(Number(value) || 0));
+  return {
+    ...assessment,
+    latitude: Number(assessment.latitude ?? target.lat),
+    longitude: Number(assessment.longitude ?? target.lon),
+    roadStatus,
+    worshipCount: count(assessment.worshipCount),
+    educationCount: count(assessment.educationCount),
+    bankOfficeCount: count(assessment.bankOfficeCount),
+    publicTransit,
+    publicTransitCount: count(assessment.publicTransitCount),
+    signboardVisibility,
+    hotelRestaurantHospitalCount: count(assessment.hotelRestaurantHospitalCount),
+  };
+}
+
+async function assessWithFetch(target, endpoint, timeoutMs = 60000) {
+  if (typeof fetch !== "function") throw new Error("Browser fetch is unavailable.");
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const response = await fetch(assessmentRequestUrlFor(target, endpoint).toString(), {
+      method: "GET",
+      mode: "cors",
+      credentials: "omit",
+      cache: "no-store",
+      redirect: "follow",
+      referrerPolicy: "no-referrer",
+      signal: controller?.signal,
+    });
+    if (!response.ok) throw new Error(`Google Map assessment returned HTTP ${response.status}.`);
+    return resolvedAssessment(await response.json(), target);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function assessWithJsonp(target, endpoint, timeoutMs = 60000) {
+  if (typeof document === "undefined" || !document.head) {
+    return Promise.reject(new Error("Google Map assessment requires a browser."));
+  }
+  return new Promise((resolve, reject) => {
+    const callback = callbackName();
+    const requestUrl = assessmentRequestUrlFor(target, endpoint, callback);
+    const script = document.createElement("script");
+    let settled = false;
+    const cleanup = () => {
+      script.remove();
+      try {
+        delete globalThis[callback];
+      } catch {
+        globalThis[callback] = undefined;
+      }
+    };
+    const finish = (handler, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      cleanup();
+      handler(value);
+    };
+    const timer = setTimeout(() => {
+      finish(reject, new Error("Google Map assessment timed out. Recheck the location and try again."));
+    }, timeoutMs);
+    globalThis[callback] = (payload) => {
+      try {
+        finish(resolve, resolvedAssessment(payload, target));
+      } catch (error) {
+        finish(reject, error);
+      }
+    };
+    script.onerror = () => {
+      finish(reject, new Error("The Google Map assessment service is unavailable."));
+    };
+    script.referrerPolicy = "no-referrer";
+    script.src = requestUrl.toString();
+    document.head.appendChild(script);
+  });
+}
+
+async function assessWithBrowserFallback(target, endpoint) {
+  let fetchError = null;
+  try {
+    return await assessWithFetch(target, endpoint);
+  } catch (error) {
+    if (error?.resolverResponded) throw error;
+    fetchError = error;
+  }
+  try {
+    return await assessWithJsonp(target, endpoint);
+  } catch (jsonpError) {
+    if (jsonpError?.resolverResponded) throw jsonpError;
+    throw new Error(jsonpError?.message || fetchError?.message || "The Google Map assessment service is unavailable.");
+  }
 }
 
 async function resolveWithFetch(shortUrl, endpoint, timeoutMs = 30000) {
@@ -169,5 +304,26 @@ export async function resolveGoogleMapsLink(shortUrl) {
     throw error;
   });
   resolverCache.set(value, pending);
+  return pending;
+}
+
+export async function assessGoogleMapLocation(target) {
+  const lat = Number(target?.lat);
+  const lon = Number(target?.lon);
+  if (!validBangladeshCoordinate(lat, lon)) {
+    throw new Error("A valid Bangladesh coordinate is required for the Google Map assessment.");
+  }
+  const key = `${lat.toFixed(5)},${lon.toFixed(5)}`;
+  if (assessmentCache.has(key)) return assessmentCache.get(key);
+  const endpointValue = await configuredResolverUrl();
+  if (!endpointValue) {
+    throw new Error("Google Map assessment resolver is not configured.");
+  }
+  const endpoint = validatedResolverUrl(endpointValue);
+  const pending = assessWithBrowserFallback({ lat, lon }, endpoint).catch((error) => {
+    assessmentCache.delete(key);
+    throw error;
+  });
+  assessmentCache.set(key, pending);
   return pending;
 }
