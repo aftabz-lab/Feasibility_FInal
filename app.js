@@ -21,7 +21,7 @@ import {
   loadOutletLocations,
   outletsWithinRadius,
 } from "./geo-outlets.js?v=feasibility-map-assessment-v26";
-import { assessGoogleMapLocation, resolveGoogleMapsLink } from "./map-link-resolver.js?v=feasibility-map-assessment-v25";
+import { assessGoogleMapLocation, resolveGoogleMapsLink } from "./map-link-resolver.js?v=feasibility-place-link-v28";
 import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-template-rules-v22";
 import { downloadFeasibilityPdf, downloadManagementFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-edited-rules-zone-count-v18";
 

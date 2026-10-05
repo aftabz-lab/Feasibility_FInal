@@ -50,6 +50,7 @@ function resolvedLocation(payload, shortUrl) {
   if (!payload?.ok) {
     const error = new Error(payload?.error || "The Google Maps link could not be resolved.");
     error.resolverResponded = true;
+    error.resolvedUrl = String(payload?.resolvedUrl || "");
     throw error;
   }
   const lat = Number(payload.latitude);
@@ -57,6 +58,7 @@ function resolvedLocation(payload, shortUrl) {
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
     const error = new Error("The resolved Google Maps link did not contain coordinates.");
     error.resolverResponded = true;
+    error.resolvedUrl = String(payload?.resolvedUrl || "");
     throw error;
   }
   return {
@@ -74,6 +76,65 @@ function validBangladeshCoordinate(lat, lon) {
     && lat <= 27
     && lon >= 88
     && lon <= 93;
+}
+
+// A Maps share link can expand to a named place ID without !3d/!4d coordinates.
+// Its first HTML response is just the map shell, not the selected place record.
+// Ask the existing resolver for that exact Google place-details record instead;
+// do not geocode the name or substitute the map viewport/another nearby place.
+function placeDetailsUrl(value) {
+  let url;
+  try {
+    url = new URL(String(value || ""));
+  } catch {
+    return null;
+  }
+  const host = url.hostname.toLowerCase().replace(/^www\./, "");
+  if (url.protocol !== "https:"
+    || !["google.com", "maps.google.com"].includes(host)
+    || !url.pathname.startsWith("/maps")) return null;
+  let decoded;
+  try {
+    decoded = decodeURIComponent(url.toString());
+  } catch {
+    return null;
+  }
+  const placeId = decoded.match(/!1s(0x[0-9a-f]+:0x[0-9a-f]+)(?=[!/?&#\s]|$)/i)?.[1];
+  if (!placeId) return null;
+  const placeSegment = url.pathname.match(/\/place\/([^/]+)/)?.[1];
+  let name = "";
+  try {
+    name = placeSegment ? decodeURIComponent(placeSegment.replace(/\+/g, " ")) : "";
+  } catch {
+    return null;
+  }
+  const details = new URL("https://www.google.com/maps/preview/place");
+  details.searchParams.set("authuser", "0");
+  details.searchParams.set("hl", "en");
+  details.searchParams.set("gl", "bd");
+  if (name) details.searchParams.set("q", name);
+  details.searchParams.set("pb", name ? `!1m2!1s${placeId}!2s${name}` : `!1m1!1s${placeId}`);
+  return details.toString();
+}
+
+async function resolveWithPlaceDetailsFallback(value, endpoint) {
+  try {
+    return await resolveWithBrowserFallback(value, endpoint);
+  } catch (error) {
+    // Only a Google response saying the location was absent is retried here.
+    // Permission, quota and network failures keep the existing handling.
+    if (!error?.resolverResponded
+      || !/(?:did not contain|did not provide|could not.*(?:location|coordinate)|usable coordinates|no coordinates)/i.test(error.message || "")) {
+      throw error;
+    }
+    const detailsUrl = placeDetailsUrl(error.resolvedUrl || value);
+    if (!detailsUrl || detailsUrl === value) throw error;
+    const resolved = await resolveWithBrowserFallback(detailsUrl, endpoint);
+    if (!validBangladeshCoordinate(resolved.lat, resolved.lon)) {
+      throw new Error("The Google Maps place resolved outside Bangladesh or did not contain valid coordinates.");
+    }
+    return { ...resolved, label: error.resolvedUrl || value };
+  }
 }
 
 function assessmentRequestUrlFor(target, endpoint, callback = "") {
@@ -299,7 +360,7 @@ export async function resolveGoogleMapsLink(shortUrl) {
     throw new Error("Google Maps short-link resolver is not configured. Install the supplied Apps Script resolver once.");
   }
   const endpoint = validatedResolverUrl(endpointValue);
-  const pending = resolveWithBrowserFallback(value, endpoint).catch((error) => {
+  const pending = resolveWithPlaceDetailsFallback(value, endpoint).catch((error) => {
     resolverCache.delete(value);
     throw error;
   });
