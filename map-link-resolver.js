@@ -1,5 +1,13 @@
+import {
+  googleMapLookupUrl,
+  googleMapPlaceDetailsUrl,
+  normalizeGoogleMapsUrl,
+  parseGoogleMapCoordinates,
+} from "./google-map-input.js?v=feasibility-google-links-v29";
+
 const resolverCache = new Map();
 const assessmentCache = new Map();
+let preferredLocationTransport = "fetch";
 
 async function configuredResolverUrl() {
   const runtimeValue = String(globalThis.FEASIBILITY_MAP_RESOLVER_URL || "").trim();
@@ -55,8 +63,8 @@ function resolvedLocation(payload, shortUrl) {
   }
   const lat = Number(payload.latitude);
   const lon = Number(payload.longitude);
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-    const error = new Error("The resolved Google Maps link did not contain coordinates.");
+  if (!validBangladeshCoordinate(lat, lon)) {
+    const error = new Error("The Google Maps link resolved outside Bangladesh or did not contain valid coordinates.");
     error.resolverResponded = true;
     error.resolvedUrl = String(payload?.resolvedUrl || "");
     throw error;
@@ -78,56 +86,19 @@ function validBangladeshCoordinate(lat, lon) {
     && lon <= 93;
 }
 
-// A Maps share link can expand to a named place ID without !3d/!4d coordinates.
-// Its first HTML response is just the map shell, not the selected place record.
-// Ask the existing resolver for that exact Google place-details record instead;
-// do not geocode the name or substitute the map viewport/another nearby place.
-function placeDetailsUrl(value) {
-  let url;
-  try {
-    url = new URL(String(value || ""));
-  } catch {
-    return null;
-  }
-  const host = url.hostname.toLowerCase().replace(/^www\./, "");
-  if (url.protocol !== "https:"
-    || !["google.com", "maps.google.com"].includes(host)
-    || !url.pathname.startsWith("/maps")) return null;
-  let decoded;
-  try {
-    decoded = decodeURIComponent(url.toString());
-  } catch {
-    return null;
-  }
-  const placeId = decoded.match(/!1s(0x[0-9a-f]+:0x[0-9a-f]+)(?=[!/?&#\s]|$)/i)?.[1];
-  if (!placeId) return null;
-  const placeSegment = url.pathname.match(/\/place\/([^/]+)/)?.[1];
-  let name = "";
-  try {
-    name = placeSegment ? decodeURIComponent(placeSegment.replace(/\+/g, " ")) : "";
-  } catch {
-    return null;
-  }
-  const details = new URL("https://www.google.com/maps/preview/place");
-  details.searchParams.set("authuser", "0");
-  details.searchParams.set("hl", "en");
-  details.searchParams.set("gl", "bd");
-  if (name) details.searchParams.set("q", name);
-  details.searchParams.set("pb", name ? `!1m2!1s${placeId}!2s${name}` : `!1m1!1s${placeId}`);
-  return details.toString();
-}
-
 async function resolveWithPlaceDetailsFallback(value, endpoint) {
   try {
     return await resolveWithBrowserFallback(value, endpoint);
   } catch (error) {
-    // Only a Google response saying the location was absent is retried here.
-    // Permission, quota and network failures keep the existing handling.
+    // Older resolver deployments may expose the expanded URL on a parsing
+    // error. Read its pin/coordinate search locally before requesting details.
     if (!error?.resolverResponded
       || !/(?:did not contain|did not provide|could not.*(?:location|coordinate)|usable coordinates|no coordinates)/i.test(error.message || "")) {
       throw error;
     }
-    const detailsUrl = placeDetailsUrl(error.resolvedUrl || value);
+    const direct = parseGoogleMapCoordinates(error.resolvedUrl);
+    if (direct) return { ...direct, label: error.resolvedUrl, provider: "Google Maps link" };
+    const detailsUrl = googleMapPlaceDetailsUrl(error.resolvedUrl || value);
     if (!detailsUrl || detailsUrl === value) throw error;
     const resolved = await resolveWithBrowserFallback(detailsUrl, endpoint);
     if (!validBangladeshCoordinate(resolved.lat, resolved.lon)) {
@@ -262,7 +233,7 @@ async function assessWithBrowserFallback(target, endpoint) {
   }
 }
 
-async function resolveWithFetch(shortUrl, endpoint, timeoutMs = 30000) {
+async function resolveWithFetch(shortUrl, endpoint, timeoutMs = 60000) {
   if (typeof fetch !== "function") {
     throw new Error("Browser fetch is unavailable.");
   }
@@ -279,16 +250,28 @@ async function resolveWithFetch(shortUrl, endpoint, timeoutMs = 30000) {
       signal: controller?.signal,
     });
     if (!response.ok) {
-      throw new Error(`Google Map resolver returned HTTP ${response.status}.`);
+      const error = new Error(`Google Map resolver returned HTTP ${response.status}.`);
+      error.resolverResponded = ![408, 429].includes(response.status) && response.status < 500;
+      throw error;
     }
-    const payload = await response.json();
+    const body = await response.text();
+    let payload;
+    try { payload = JSON.parse(body); }
+    catch {
+      const signInRequired = /accounts\.google\.com|ServiceLogin|Sign in.*Google|Authorization is required/i.test(body);
+      const error = new Error(signInRequired
+        ? "The Google Map resolver requires sign-in. Its web app access must be set to Anyone."
+        : "The Google Map resolver returned an incomplete response.");
+      error.resolverResponded = signInRequired;
+      throw error;
+    }
     return resolvedLocation(payload, shortUrl);
   } finally {
     if (timer) clearTimeout(timer);
   }
 }
 
-function resolveWithJsonp(shortUrl, endpoint, timeoutMs = 20000) {
+function resolveWithJsonp(shortUrl, endpoint, timeoutMs = 60000) {
   if (typeof document === "undefined" || !document.head) {
     return Promise.reject(new Error("Google Map link resolution requires a browser."));
   }
@@ -325,7 +308,7 @@ function resolveWithJsonp(shortUrl, endpoint, timeoutMs = 20000) {
       }
     };
     script.onerror = () => {
-      finish(reject, new Error("The Google Map link resolver is unavailable. Recheck its Apps Script deployment."));
+      finish(reject, new Error("The Google Map resolver connection failed."));
     };
     script.referrerPolicy = "no-referrer";
     script.src = requestUrl.toString();
@@ -334,25 +317,35 @@ function resolveWithJsonp(shortUrl, endpoint, timeoutMs = 20000) {
 }
 
 async function resolveWithBrowserFallback(shortUrl, endpoint) {
-  let fetchError = null;
-  try {
-    return await resolveWithFetch(shortUrl, endpoint);
-  } catch (error) {
-    if (error?.resolverResponded) throw error;
-    fetchError = error;
+  const hasJsonp = typeof document !== "undefined" && Boolean(document.head);
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const transports = hasJsonp
+      ? preferredLocationTransport === "jsonp" ? ["jsonp", "fetch"] : ["fetch", "jsonp"]
+      : ["fetch"];
+    for (const transport of transports) {
+      try {
+        const result = await (transport === "jsonp"
+          ? resolveWithJsonp(shortUrl, endpoint) : resolveWithFetch(shortUrl, endpoint));
+        preferredLocationTransport = transport;
+        return result;
+      } catch (error) {
+        if (error?.resolverResponded) {
+          if (!/(?:HTTP (?:408|429|5\d\d)|timed? out|temporarily unavailable|network error)/i.test(error.message || "")) throw error;
+        }
+        lastError = error;
+      }
+    }
+    if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 800));
   }
-  try {
-    return await resolveWithJsonp(shortUrl, endpoint);
-  } catch (jsonpError) {
-    if (jsonpError?.resolverResponded) throw jsonpError;
-    const cause = jsonpError?.message || fetchError?.message || "The browser blocked the resolver request.";
-    throw new Error(`${cause} Refresh once and, if it continues, allow script.google.com for this dashboard.`);
-  }
+  throw new Error(`The Google Map resolver could not be reached after automatic retries. ${lastError?.message || "Check the connection and recheck this location."}`);
 }
 
 export async function resolveGoogleMapsLink(shortUrl) {
-  const value = String(shortUrl || "").trim();
-  if (!value) throw new Error("Enter Google Map Location first.");
+  if (!String(shortUrl || "").trim()) throw new Error("Enter Google Map Location first.");
+  const direct = parseGoogleMapCoordinates(shortUrl);
+  if (direct) return { ...direct, label: normalizeGoogleMapsUrl(shortUrl) || String(shortUrl).trim(), provider: "Google Maps / coordinates" };
+  const value = googleMapLookupUrl(shortUrl);
   if (resolverCache.has(value)) return resolverCache.get(value);
 
   const endpointValue = await configuredResolverUrl();

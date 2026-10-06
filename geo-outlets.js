@@ -1,3 +1,5 @@
+import { isGoogleMapsInput, parseGoogleMapCoordinates } from "./google-map-input.js?v=feasibility-google-links-v29";
+
 const BANGLADESH_BOUNDS = Object.freeze({ minLat: 20, maxLat: 27, minLon: 88, maxLon: 93 });
 
 export const LOCATION_ASSESSMENT_RULES = Object.freeze({
@@ -45,47 +47,11 @@ function decoded(value) {
 }
 
 export function parseLocationCoordinates(value) {
-  const text = decoded(value).trim();
-  if (!text) return null;
-
-  const dms = text.match(/(\d{1,2})°\s*(\d{1,2})['’]\s*([\d.]+)["”]?\s*([NS]).*?(\d{1,3})°\s*(\d{1,2})['’]\s*([\d.]+)["”]?\s*([EW])/i);
-  if (dms) {
-    const lat = (Number(dms[1]) + Number(dms[2]) / 60 + Number(dms[3]) / 3600) * (dms[4].toUpperCase() === "S" ? -1 : 1);
-    const lon = (Number(dms[5]) + Number(dms[6]) / 60 + Number(dms[7]) / 3600) * (dms[8].toUpperCase() === "W" ? -1 : 1);
-    if (validCoordinate(lat, lon)) return { lat, lon };
-  }
-
-  const patterns = [
-    /!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/,
-    /\/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/,
-    /\/place\/(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/,
-    /[?&](?:q|query)=(-?\d+(?:\.\d+)?)[,\s]+(-?\d+(?:\.\d+)?)/i,
-    /^\s*(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)\s*$/,
-  ];
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (!match) continue;
-    const lat = Number(match[1]);
-    const lon = Number(match[2]);
-    if (validCoordinate(lat, lon)) return { lat, lon };
-  }
-  return null;
+  return parseGoogleMapCoordinates(value);
 }
 
 export function isGoogleMapsLink(value) {
-  let url;
-  try {
-    const text = String(value || "").trim();
-    url = new URL(/^https?:\/\//i.test(text) ? text : `https://${text}`);
-  } catch {
-    return false;
-  }
-  const host = url.hostname.toLowerCase().replace(/^www\./, "");
-  return host === "maps.app.goo.gl"
-    || host === "maps.google.com"
-    || host === "google.com" && url.pathname.startsWith("/maps")
-    || host === "goo.gl" && url.pathname.startsWith("/maps/")
-    || host === "g.page";
+  return isGoogleMapsInput(value);
 }
 
 function normalizeDistrict(value) {
@@ -560,6 +526,9 @@ export async function geocodeLocationArea(googleMapLocation, district, fetchImpl
       label: resolved.label || address,
       provider: resolved.provider || "Google Maps link",
     };
+  }
+  if (/^(?:https?:\/\/|\/\/|comgooglemaps|geo:|google\.navigation:)/i.test(address)) {
+    throw new Error("This link is not a Google Maps location. Paste a public Google Maps pin or latitude, longitude.");
   }
   const addressParts = address.split(/[,\n]+/).map((part) => part.trim()).filter(Boolean);
   const simplified = addressParts.filter((part) => !/(?:house|holding|flat|floor|apartment|\broad\s*no\b|\bplot\s*no\b|\b\d{4}\b)/i.test(part));
