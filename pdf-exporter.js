@@ -1,4 +1,5 @@
-import { formatMoney, formatPercent } from "./model.mjs";
+import { formatMoney, formatPercent } from "./model.mjs?v=feasibility-commission-catchment-v31";
+import { appendCatchmentPage } from "./catchment-pdf.js?v=feasibility-commission-catchment-v31";
 
 /* global jspdf */
 
@@ -661,11 +662,12 @@ export async function downloadFeasibilityPdf(data, model, assets = []) {
   doc.save(`${safeName(data.project.locationArea)}_feasibility_report.pdf`);
 }
 
-export async function downloadManagementFeasibilityPdf(data, model, assets = []) {
+export async function downloadManagementFeasibilityPdf(data, model, assets = [], catchment = null) {
   const doc = await buildFeasibilityPdf(data, model, assets, {
     includePageSignatures: false,
     includeSignatorySection: false,
   });
+  if (catchment) await appendCatchmentPage(doc, catchment);
   doc.save(`${safeName(data.project.locationArea)}_management_feasibility_report.pdf`);
 }
 

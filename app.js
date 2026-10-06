@@ -11,9 +11,10 @@ import {
   getOpenedDesignation,
   getOutboundTransportDefault,
   getSignatoryAutoLink,
+  lookupFranchiseCommissionRate,
   openedByOptions,
   salesGivenByOptions,
-} from "./model.mjs?v=feasibility-google-map-location-v21";
+} from "./model.mjs?v=feasibility-commission-catchment-v31";
 import {
   assessLocationEnvironment,
   geocodeLocationArea,
@@ -22,12 +23,14 @@ import {
   outletsWithinRadius,
 } from "./geo-outlets.js?v=feasibility-assessment-get-v30";
 import { assessGoogleMapLocation, resolveGoogleMapsLink } from "./map-link-resolver.js?v=feasibility-assessment-get-v30";
-import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-template-rules-v22";
-import { downloadFeasibilityPdf, downloadManagementFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-edited-rules-zone-count-v18";
+import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-commission-catchment-v31";
+import { downloadFeasibilityPdf, downloadManagementFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-commission-catchment-v31";
+import { readCatchmentWorkbook } from "./catchment-pdf.js?v=feasibility-commission-catchment-v31";
 
 const app = document.querySelector("#app");
 const workbookInput = document.querySelector("#workbook-file");
 const signatureInput = document.querySelector("#signature-file");
+const catchmentInput = document.querySelector("#catchment-file");
 
 const state = {
   view: "entry",
@@ -35,6 +38,7 @@ const state = {
   model: calculateModel(defaultData),
   signatureAssets: [],
   rulesWorkbook: { buffer: null, sourceName: "source-workbook.xlsx" },
+  catchment: null,
   status: { kind: "loading", message: "Loading the workbook baseline…" },
   firstFeasibilityEntry: null,
   outletLocations: [],
@@ -394,7 +398,7 @@ function headerHtml() {
           </div>
           <button class="btn btn-secondary" type="button" data-action="upload-workbook">Load Excel</button>
           <button class="btn btn-primary" type="button" data-action="download-rules-xlsx">Download Excel with Rules</button>
-          <div class="pdf-download-stack"><button class="btn btn-pdf" type="button" data-action="download-pdf">Download 3-page PDF</button><button class="btn btn-pdf" type="button" data-action="download-management-pdf">Management PDF</button></div><button class="btn btn-secondary" type="button" data-action="share-pdf">Share PDF</button>
+          <div class="pdf-download-stack"><button class="btn btn-pdf" type="button" data-action="download-pdf">Download 3-page PDF</button><button class="btn btn-pdf" type="button" data-action="download-management-pdf">Management PDF</button><button class="btn btn-pdf" type="button" data-action="upload-catchment" title="${escapeHtml(state.catchment?.fileName || "Upload Catchment")}">Upload Catchment</button></div><button class="btn btn-secondary" type="button" data-action="share-pdf">Share PDF</button>
         </div>
       </header>
       <nav class="navigation" aria-label="Dashboard sections">${navHtml()}</nav>
@@ -1116,6 +1120,27 @@ function applyChange(target) {
     render();
     return;
   }
+  if (path === "project.gpShareOverride" && selectedValue !== null && selectedValue !== "" && String(state.data.project.frOwn).toUpperCase() === "FR") {
+    try {
+      const share = Number(selectedValue) > 1 ? Number(selectedValue) / 100 : Number(selectedValue);
+      lookupFranchiseCommissionRate(share, state.data.reference.franchiseCommissionTable);
+    } catch (error) {
+      state.status = { kind: "error", message: error.message };
+      render();
+      return;
+    }
+  }
+  if (path === "project.frOwn" && String(selectedValue).toUpperCase() === "FR") {
+    try {
+      const currentShare = state.data.project.gpShareOverride ?? state.data.reference.autoGpShareFr;
+      const share = Number(currentShare) > 1 ? Number(currentShare) / 100 : Number(currentShare);
+      lookupFranchiseCommissionRate(share, state.data.reference.franchiseCommissionTable);
+    } catch (error) {
+      state.status = { kind: "error", message: error.message };
+      render();
+      return;
+    }
+  }
   setPath(state.data, path, selectedValue);
   if (FEASIBILITY_RATIO_PATHS.has(path)) captureManualFeasibilityEntry();
   if (/^staff\.\d+\.quantity$/.test(path)) {
@@ -1181,11 +1206,13 @@ function setSignatoryMode(index, useManualOverride) {
 
 async function loadWorkbookFromBuffer(buffer, sourceName) {
   if (!globalThis.XLSX) throw new Error("Excel import module did not load. Refresh and try again.");
+  const workbook = XLSX.read(buffer, { type: "array", cellFormula: true, cellStyles: false, cellNF: true });
+  const importedData = extractFromWorkbook(workbook, sourceName);
+  calculateModel(importedData); // Validate the new commission lookup before replacing the active workbook.
   if (buffer instanceof ArrayBuffer) {
     state.rulesWorkbook = { buffer: buffer.slice(0), sourceName };
   }
-  const workbook = XLSX.read(buffer, { type: "array", cellFormula: true, cellStyles: false, cellNF: true });
-  state.data = extractFromWorkbook(workbook, sourceName);
+  state.data = importedData;
   state.locationAssessment = { kind: "waiting", message: "Enter Google Map Location and select District for automatic assessment." };
   state.locationLookup = { kind: "waiting", message: "Enter Google Map Location and select District to calculate the 1 KM count." };
   state.firstFeasibilityEntry = null;
@@ -1269,6 +1296,19 @@ async function handleSignatureFile(file) {
   const id = `upload-${Date.now()}`;
   state.signatureAssets.push({ id, label: file.name, dataUrl, extension: file.type.includes("jpeg") || file.type.includes("jpg") ? "jpeg" : "png" });
   state.status = { kind: "ready", message: `${file.name} is available to select in the signature manager.` };
+  render();
+}
+
+async function handleCatchmentFile(file) {
+  if (!file) return;
+  try {
+    setStatus("loading", "Reading catchment…");
+    const catchment = readCatchmentWorkbook(await file.arrayBuffer(), file.name);
+    state.catchment = catchment;
+    state.status = { kind: "ready", message: `${file.name} uploaded. The catchment page will be added to Management PDF.` };
+  } catch (error) {
+    state.status = { kind: "error", message: `Could not load catchment: ${error.message}` };
+  }
   render();
 }
 
@@ -1364,8 +1404,8 @@ async function downloadManagementPdfExport() {
   // the management-only export path that omits every signature and signatory block.
   recalculate();
   try {
-    setStatus("loading", "Creating the three-page Management PDF…");
-    await downloadManagementFeasibilityPdf(state.data, state.model, state.signatureAssets);
+    setStatus("loading", "Creating Management PDF…");
+    await downloadManagementFeasibilityPdf(state.data, state.model, state.signatureAssets, state.catchment);
     state.status = { kind: "ready", message: "Management PDF downloaded successfully." };
   } catch (error) {
     state.status = { kind: "error", message: `Management PDF export failed: ${error.message}` };
@@ -1385,6 +1425,7 @@ app.addEventListener("click", (event) => {
   const { action: actionName } = action.dataset;
   if (actionName === "upload-workbook") workbookInput.click();
   if (actionName === "upload-signature") signatureInput.click();
+  if (actionName === "upload-catchment") catchmentInput.click();
   if (actionName === "download-xlsx") downloadExport();
   if (actionName === "download-rules-xlsx") downloadRulesExport();
   if (actionName === "download-pdf") downloadPdfExport();
@@ -1471,6 +1512,11 @@ workbookInput.addEventListener("change", () => {
 signatureInput.addEventListener("change", () => {
   handleSignatureFile(signatureInput.files?.[0]);
   signatureInput.value = "";
+});
+
+catchmentInput.addEventListener("change", () => {
+  void handleCatchmentFile(catchmentInput.files?.[0]);
+  catchmentInput.value = "";
 });
 
 async function initialise() {

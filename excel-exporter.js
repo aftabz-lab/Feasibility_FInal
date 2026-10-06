@@ -1,4 +1,5 @@
 /* global ExcelJS */
+import { FR_COMMISSION_REFERENCE_ROWS, FR_COMMISSION_SHEET_NAME } from "./model.mjs?v=feasibility-commission-catchment-v31";
 
 const COLORS = {
   navy: "17324D",
@@ -1527,6 +1528,69 @@ function upsertDashboardSupportSheets(zip, data) {
   synchronizeExtendedWorksheetProperties(zip);
 }
 
+function upsertFranchiseCommissionSheet(zip, data) {
+  const table = data?.reference?.franchiseCommissionTable || FR_COMMISSION_REFERENCE_ROWS;
+  const rows = [supportSheetRow(1, [
+    supportSheetCell("B1", "GP/FR Share"), supportSheetCell("C1", "GPOI"),
+    supportSheetCell("D1", "FR Com"), supportSheetCell("E1", "COM %"),
+  ])];
+  table.forEach((values, index) => {
+    const row = index + 2;
+    rows.push(supportSheetRow(row, values.map((value, col) => supportSheetCell(`${["B", "C", "D", "E"][col]}${row}`, Number(value)))));
+  });
+  ensureWorksheetPart(zip, FR_COMMISSION_SHEET_NAME, `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="B1:E${table.length + 1}"/><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="18"/><cols><col min="2" max="5" width="22" customWidth="1"/></cols><sheetData>${rows.join("")}</sheetData></worksheet>`, true);
+  synchronizeExtendedWorksheetProperties(zip);
+}
+
+function clearEditedFeasibilityRows(zip, path) {
+  const entry = zipEntry(zip, path);
+  let xml = readXmlContent(entry);
+  [66, 67].forEach((row) => {
+    const rowPattern = new RegExp(`<row\\b(?=[^>]*\\br="${row}")[^>]*>[\\s\\S]*?<\\/row>`, "i");
+    xml = xml.replace(rowPattern, (rowXml) => rowXml.replace(
+      /<c\b[^>]*\/>|<c\b(?![^>]*\/>)[^>]*>[\s\S]*?<\/c>/gi,
+      (cellXml) => openingCellTag(cellXml, xmlAttribute(cellXml, "r")).replace(/>$/, "/>"),
+    ));
+  });
+  writeXmlContent(entry, xml);
+}
+
+function editedFeasibilityFormulas(model) {
+  const formulas = {
+    B18: dashboardFormulaSpec(`VLOOKUP(INFORMATION!B7,'${FR_COMMISSION_SHEET_NAME}'!B:E,4,)`, model?.inputs?.franchiseCommissionRate ?? 0),
+    B60: dashboardFormulaSpec("B18", model?.inputs?.franchiseCommissionRate ?? 0),
+  };
+  ["C", "D", "E"].forEach((col) => {
+    formulas[`${col}48`] = dashboardFormulaSpec(`($C$3*70%)*14%/12+IF(${col}5>55,(${col}5-55)*${col}9*(1-${col}14)*14%/12,0)`);
+    formulas[`${col}65`] = dashboardFormulaSpec("($C$57+$C$59+$C$58)*14%/12");
+  });
+  ["H", "I", "J", "K"].forEach((col) => {
+    formulas[`${col}48`] = dashboardFormulaSpec(`($C$3*70%)*14%+IF(${col}5>55,(${col}5-55)*${col}9*(1-${col}14)*14%,0)`);
+  });
+  ["G", "H", "I", "J"].forEach((col) => { formulas[`${col}84`] = dashboardFormulaSpec(`${col}75-${col}65+${col}66`); });
+  formulas.K84 = dashboardFormulaSpec("K75-K65+K66+K67");
+  return formulas;
+}
+
+function applyEditedFeasibilityRules(zip, path, data, model) {
+  clearEditedFeasibilityRows(zip, path);
+  const dashboard = buildDashboardFeasibilityPatch(data, model);
+  const formulas = editedFeasibilityFormulas(model);
+  // Formula replacement retains each original cell's font, borders and number format.
+  patchWorksheetValues(zip, path, Object.fromEntries(Object.keys(formulas).map((address) => [address, ""])));
+  Object.entries(formulas).forEach(([address, spec]) => {
+    if (spec.value === undefined) spec.value = dashboard.values[address];
+  });
+  patchWorksheetFormulas(zip, path, formulas);
+  const changedRows = new Set([18, 44, 46, 48, 50, 54, 60, 65, 75, 77, 79, 81, 84, 85, 86, 89, 90, 91, 92]);
+  const formulaAddresses = worksheetFormulaAddresses(zip, path);
+  const caches = Object.fromEntries(Object.entries(dashboard.values).filter(([address]) => (
+    !/^A/.test(address) && formulaAddresses.has(address) && changedRows.has(Number(address.match(/\d+$/)?.[0]))
+  )));
+  refreshWorksheetFormulaCaches(zip, path, caches);
+}
+
 function packageEntryPaths(zip) {
   return (zip?.FullPaths || [])
     .map((path) => String(path || "").replace(/^Root Entry\//, "").replace(/\/$/, ""))
@@ -2073,7 +2137,7 @@ function buildDashboardFeasibilityPatch(data, model) {
   ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}15`, `$B$15*${col}10`)); yearlySum(15);
   ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}16`, `${col}15+${col}13`)); yearlySum(16);
 
-  formula("B18", "INFORMATION!B7", Number(model?.inputs?.gpShare || 0));
+  formula("B18", `VLOOKUP(INFORMATION!B7,'${FR_COMMISSION_SHEET_NAME}'!B:E,4,)`, Number(model?.inputs?.franchiseCommissionRate || 0));
   ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}18`, `$B$18*${col}16`)); yearlySum(18);
   yearlySum(19);
 
@@ -2165,7 +2229,7 @@ function buildDashboardFeasibilityPatch(data, model) {
   formula("C58", "INFORMATION!B16"); formula("G58", "C58"); yearlySum(58);
   values.C59 = Number(advanced.securityDeposit || 0); formula("G59", "C59"); yearlySum(59);
 
-  formula("B60", "B18", Number(model?.inputs?.gpShare || 0));
+  formula("B60", "B18", Number(model?.inputs?.franchiseCommissionRate || 0));
   ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}60`, `${col}18`)); yearlySum(60);
 
   formula("C62", 'IF(UPPER(Master!C4)="FR",INFORMATION!B15,0)'); formula("D62", "C62"); formula("E62", "D62"); formula("G62", "SUM(C62:E62)*4");
@@ -2208,15 +2272,15 @@ function buildDashboardFeasibilityPatch(data, model) {
 
   // Hidden legacy rows are not part of the dashboard report and are no longer
   // used in the return formulas. They remain only to preserve template structure.
-  ["C","D","E","G","H","I","J","K","L"].forEach((col) => { values[`${col}66`] = 0; values[`${col}67`] = 0; });
+  ["A","B","C","D","E","F","G","H","I","J","K","L"].forEach((col) => { values[`${col}66`] = ""; values[`${col}67`] = ""; });
 
   const initialInvestment = Number(model?.inputs?.initialInvestment || 0);
   values.F84 = -initialInvestment;
   formula("F84", "-SUM(C57:C59)", -initialInvestment);
   const yearCols = ["G","H","I","J","K"];
   (model?.metrics?.yearlyCashFlow || []).forEach((value, index) => { values[`${yearCols[index]}84`] = Number(value || 0); });
-  formula("G84", "G75-G65"); formula("H84", "H75-H65"); formula("I84", "I75-I65"); formula("J84", "J75-J65");
-  formula("K84", `K75-K65+${nf(advanced.terminalRecovery, 3000000)}`);
+  formula("G84", "G75-G65+G66"); formula("H84", "H75-H65+H66"); formula("I84", "I75-I65+I66"); formula("J84", "J75-J65+J66");
+  formula("K84", "K75-K65+K66+K67");
 
   (model?.metrics?.cumulativeCashFlow || []).forEach((value, index) => { values[`${yearCols[index]}85`] = Number(value || 0); });
   formula("G85", "F84+G84"); formula("H85", "G85+H84"); formula("I85", "H85+I84"); formula("J85", "I85+J84"); formula("K85", "J85+K84");
@@ -2259,7 +2323,6 @@ function buildTemplateFeasibilityInputValues(data, model) {
     B48: Number(advanced.outletFinanceRate ?? 0.14),
     C59: Number(advanced.securityDeposit || 0),
     B65: Number(advanced.franchiseFinanceRate ?? 0.14),
-    G67: Number(advanced.terminalRecovery ?? 3000000),
     C69: Number(advanced.franchiseMaintenanceMonthly ?? 2000),
     C70: Number(advanced.franchiseGeneratorMonthly ?? 2000),
     C71: Number(advanced.franchiseIceMonthly || 0),
@@ -2272,6 +2335,7 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
   const cfbApi = getCfbApi();
   const zip = cfbApi.read(asUint8Array(templateBuffer), { type: "array" });
   upsertDashboardSupportSheets(zip, data);
+  upsertFranchiseCommissionSheet(zip, data);
   const { paths, workbookEntry, workbookXml } = worksheetPaths(zip);
   const requiredSheets = [
     "Master",
@@ -2481,6 +2545,7 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     paths.get("AUTO GENERATED FEASIBILITY"),
     { A1: data?.project?.locationArea ?? "" },
   );
+  applyEditedFeasibilityRules(zip, paths.get("AUTO GENERATED FEASIBILITY"), data, model);
   hideWorksheetRows(zip, paths.get("AUTO GENERATED FEASIBILITY"), [66, 67]);
 
   // Excel output only: remove source signature drawings from the first two

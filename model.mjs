@@ -87,6 +87,29 @@ export const salesGivenByOptions = [
   "Nahid Hasan",
 ];
 
+// Exact B:E reference values supplied in FEASIBILITY_Edited_sir.xlsx.
+// GP share remains the INFORMATION input; commission is its separate lookup.
+export const FR_COMMISSION_SHEET_NAME = "Fr Com% vs GP Share%";
+export const FR_COMMISSION_REFERENCE_ROWS = Object.freeze([
+  [0.4, 216236094.96396768, 81823342.31780863, 0.3783981685918033],
+  [0.5, 14612129.16419092, 6923298.733507378, 0.4738049230001263],
+  [0.45, 19106519.396355767, 8179967.367512893, 0.42812441124536155],
+  [0.35, 2944504.8046399434, 979987.2382083233, 0.33281903179918804],
+  [0.43, 1976743.1024383586, 800461.8044278886, 0.4049397230426657],
+  [0.36, 198867.13133755504, 67806.72577428953, 0.34096497152762306],
+  [0.38, 1148509.1020809629, 409356.10384340404, 0.3564239091372451],
+  [0.37, 620666.9914418305, 218792.5786446599, 0.35251202603250625],
+  [0.42, 882030.8621041488, 358912.5539556261, 0.4069160948625018],
+].map((row) => Object.freeze(row)));
+
+export function lookupFranchiseCommissionRate(gpShare, rows = FR_COMMISSION_REFERENCE_ROWS) {
+  const match = rows.find((row) => Math.abs(Number(row[0]) - Number(gpShare)) < 1e-12);
+  if (!match || !Number.isFinite(Number(match[3]))) {
+    throw new Error(`GP Share ${(Number(gpShare) * 100).toFixed(2)}% is not listed in ${FR_COMMISSION_SHEET_NAME}.`);
+  }
+  return Number(match[3]);
+}
+
 // Reconciled from district_Division.xlsx and the current FS1 outlet record.
 // Satkhira is included because it is in FS1's Record sheet but absent from the
 // supplied district mapping workbook. Exact duplicate mapping rows are removed.
@@ -473,6 +496,7 @@ export const defaultData = {
     writeOffLookup: {},
     autoGpPercent: 0.15969475504252637,
     autoGpShareFr: 0.4,
+    franchiseCommissionTable: FR_COMMISSION_REFERENCE_ROWS.map((row) => [...row]),
     referenceSalesPerDay: 133627.54758420604,
     referenceFootfall: 207.2727560856395,
     referenceBasket: 644.6942189015655,
@@ -792,6 +816,9 @@ export function calculateModel(data) {
   const decorationCostIsAuto = optionalNumber(info.decorationCostOverride) === null
     || optionalNumber(info.decorationCostOverride) === undefined;
   const isFranchise = String(project.frOwn).toUpperCase() === "FR";
+  const franchiseCommissionRate = isFranchise
+    ? lookupFranchiseCommissionRate(gpShare, data.reference.franchiseCommissionTable)
+    : 0;
   const growth = [advanced.salesGrowthYear2, advanced.salesGrowthYear3, advanced.salesGrowthYear4, advanced.salesGrowthYear5];
 
   const sales = annualMonthly(monthlySales, growth);
@@ -826,7 +853,7 @@ export function calculateModel(data) {
   const cogs = subtract(sales, gpv);
   const otherIncome = multiply(sales, Array(8).fill(number(info.otherIncomeRate)));
   const totalIncome = add(gpv, otherIncome);
-  const franchiseCommission = isFranchise ? multiply(totalIncome, Array(8).fill(gpShare)) : series();
+  const franchiseCommission = isFranchise ? multiply(totalIncome, Array(8).fill(franchiseCommissionRate)) : series();
 
   const groupedStaffCost = (group) => sum(data.staff.filter((row) => row.group === group).map((row) => number(row.quantity) * number(row.salary)));
   const annualStaff = (monthly) => annualMonthly(monthly, Array(4).fill(number(advanced.staffEscalation)));
@@ -905,7 +932,7 @@ export function calculateModel(data) {
   // Only the CEP term was implemented before, so stock held past the free period
   // was never charged.
   const averageStockLevel = number(project.sft) * number(advanced.stockPerSft);
-  const outletFinanceRate = number(advanced.outletFinanceRate);
+  const outletFinanceRate = 0.14; // Edited AUTO GENERATED FEASIBILITY C48:E48/H48:K48.
   const freeHoldingDays = number(advanced.stockFreeHoldingDays);
   const cepFinanceAnnual = cepValue * number(advanced.outletDepreciablePortion) * outletFinanceRate;
   const monthlyHoldingDays = safeDivide(averageStockLevel * 30, monthlySales * (1 - gpRates[0]));
@@ -937,7 +964,7 @@ export function calculateModel(data) {
   const franchiseRentVat = multiply(franchiseRent, Array(8).fill(isFranchise ? number(advanced.rentVatRate) : 0));
   const franchiseDepreciationMonthly = isFranchise ? safeDivide(decorationCostValue, advanced.franchiseDepreciationMonths) : 0;
   const franchiseDepreciation = annualMonthly(franchiseDepreciationMonthly, [0, 0, 0, 0]);
-  const franchiseFinancingMonthly = isFranchise ? safeDivide((decorationCostValue + number(project.advance) + number(advanced.securityDeposit)) * number(advanced.franchiseFinanceRate), 12) : 0;
+  const franchiseFinancingMonthly = isFranchise ? safeDivide((decorationCostValue + number(project.advance) + number(advanced.securityDeposit)) * 0.14, 12) : 0;
   const franchiseFinancing = annualMonthly(franchiseFinancingMonthly, [0, 0, 0, 0]);
   const franchiseUtility = annualMonthly(
     isFranchise ? electricityMonthlyValue : 0,
@@ -970,7 +997,7 @@ export function calculateModel(data) {
     franchiseEbitda[4] - franchiseFinancing[4],
     franchiseEbitda[5] - franchiseFinancing[5],
     franchiseEbitda[6] - franchiseFinancing[6],
-    franchiseEbitda[7] - franchiseFinancing[7] + number(advanced.terminalRecovery),
+    franchiseEbitda[7] - franchiseFinancing[7], // Rows 66 and 67 are blank in the edited workbook.
   ];
   const cumulativeCashFlow = [];
   yearlyCashFlow.reduce((running, value) => {
@@ -1000,7 +1027,7 @@ export function calculateModel(data) {
     line("GP %", gpRates, { type: "percent", total: safeDivide(sum(gpv.slice(3)), sum(sales.slice(3))) }),
     line("Space Rent & Other Income", otherIncome, { rate: info.otherIncomeRate }),
     line("TOTAL INCOME", totalIncome, { emphasis: true, separatorBefore: true }),
-    line("Franchisee Commission", franchiseCommission, { rate: gpShare, separatorBefore: true }),
+    line("Franchisee Commission", franchiseCommission, { rate: franchiseCommissionRate, separatorBefore: true }),
     line("Rent", series()),
     line("Outlet staff salary (Contractual)", staffContractual),
     line("Outlet staff salary (Permanent)", staffPermanent),
@@ -1027,7 +1054,7 @@ export function calculateModel(data) {
     line("Stock write off (Provision)", stockWriteOff, { rate: stockWriteOffRateValue }),
     line("Total Outlet Level OPEX", outletOpex, { emphasis: true, separatorBefore: true }),
     line("Outlet level Gain/Loss Before OFC", outletGainLossBeforeOFC, { emphasis: true }),
-    line("Operating Financing Cost", operatingFinanceCost, { rate: advanced.outletFinanceRate }),
+    line("Operating Financing Cost", operatingFinanceCost, { rate: outletFinanceRate }),
     line("Outlet level P/L after OFC", outletPLAfterOFC, { emphasis: true, separatorBefore: true }),
     line("Outbound Transport", transport),
     line("P/L considering Outbound Transport", outletPLAfterTransport, { emphasis: true, separatorBefore: true }),
@@ -1035,11 +1062,11 @@ export function calculateModel(data) {
     line("Decoration Cost (Approx.)", decorationCost),
     line("Advance", advance),
     line("Security deposit", securityDeposit),
-    line("Franchisee Commission", franchiseCommission, { rate: gpShare, separatorBefore: true }),
+    line("Franchisee Commission", franchiseCommission, { rate: franchiseCommissionRate, separatorBefore: true }),
     line("Rent", franchiseRent),
     line("Rent VAT (15%)", franchiseRentVat, { rate: advanced.rentVatRate }),
     line("Depreciation", franchiseDepreciation),
-    line("Financing cost", franchiseFinancing, { rate: advanced.franchiseFinanceRate }),
+    line("Financing cost", franchiseFinancing, { rate: 0.14 }),
     line("Electricity & Utility", franchiseUtility),
     line("Maintenance", franchiseMaintenance),
     line("Generator Running Exp", franchiseGenerator),
@@ -1105,6 +1132,7 @@ export function calculateModel(data) {
       dailyFootfall,
       gpPercent,
       gpShare,
+      franchiseCommissionRate,
       cepValue,
       decorationCost: decorationCostValue,
       electricityMonthly: electricityMonthlyValue,
@@ -1292,6 +1320,17 @@ export function extractFromWorkbook(workbook, sourceName = "Imported workbook") 
   }
   data.reference.autoGpPercent = pickNumber(get(informationSheet, "B10") ?? get(forecastSheet, editedLayout ? "C21" : "C23"), data.reference.autoGpPercent);
   data.reference.autoGpShareFr = pickNumber(get(informationSheet, "B7"), data.reference.autoGpShareFr);
+  const commissionSheet = workbook.Sheets[FR_COMMISSION_SHEET_NAME];
+  if (commissionSheet) {
+    const rows = [];
+    for (let row = 2; row <= 1000; row += 1) {
+      const values = ["B", "C", "D", "E"].map((col) => get(FR_COMMISSION_SHEET_NAME, `${col}${row}`));
+      if (values[0] !== undefined && values[0] !== null && values[0] !== "" && values.every((value) => Number.isFinite(Number(value)))) {
+        rows.push(values.map(Number));
+      }
+    }
+    if (rows.length) data.reference.franchiseCommissionTable = rows;
+  }
   data.reference.autoBasketSize = pickNumber(get(informationSheet, "B11") ?? get(forecastSheet, editedLayout ? "C28" : "C30"), data.reference.autoBasketSize);
   data.reference.referenceSalesPerDay = pickNumber(get(forecastSheet, editedLayout ? "C23" : "C25"), data.reference.referenceSalesPerDay);
   data.reference.referenceFootfall = pickNumber(get(forecastSheet, editedLayout ? "C24" : "C26"), data.reference.referenceFootfall);
