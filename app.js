@@ -20,8 +20,8 @@ import {
   isGoogleMapsLink,
   loadOutletLocations,
   outletsWithinRadius,
-} from "./geo-outlets.js?v=feasibility-google-links-v29";
-import { assessGoogleMapLocation, resolveGoogleMapsLink } from "./map-link-resolver.js?v=feasibility-google-links-v29";
+} from "./geo-outlets.js?v=feasibility-assessment-get-v30";
+import { assessGoogleMapLocation, resolveGoogleMapsLink } from "./map-link-resolver.js?v=feasibility-assessment-get-v30";
 import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-template-rules-v22";
 import { downloadFeasibilityPdf, downloadManagementFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-edited-rules-zone-count-v18";
 
@@ -333,7 +333,7 @@ async function refreshLocationIntelligence() {
         geocoder: target.provider || "",
         existingOutletMatches: matches,
       };
-      locationAssessmentMessage("warning", `${assessmentError?.message || "Nearby map assessment failed."} Recheck the address to retry.`);
+      locationAssessmentMessage("warning", `${assessmentError?.message || "Nearby map assessment failed."} The location was resolved. Click Recheck map to retry the nearby-data check.`);
     }
 
     if (state.data.project.includeExistingOutlets !== true) {

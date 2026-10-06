@@ -12,18 +12,18 @@ export const LOCATION_ASSESSMENT_RULES = Object.freeze({
 });
 
 // Public Overpass servers with worldwide data (OpenStreetMap wiki, 2026).
-// overpass.kumi.systems was renamed to overpass.private.coffee, and the main
-// overpass-api.de server is overloaded, so it is asked last.
+// GET is supported by these worldwide mirrors. The main instance answered
+// the assessment query successfully with GET when POST was refused.
 const OVERPASS_ENDPOINTS = Object.freeze([
+  "https://overpass-api.de/api/interpreter",
   "https://overpass.private.coffee/api/interpreter",
   "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
-  "https://overpass-api.de/api/interpreter",
 ]);
 // If a server has not answered within the stagger, the next server is asked as
 // well and the first complete answer wins, so one slow server cannot stall the
 // nearby assessment.
 const OVERPASS_STAGGER_MS = 5000;
-const OVERPASS_REQUEST_TIMEOUT_MS = 30000;
+const OVERPASS_REQUEST_TIMEOUT_MS = 60000;
 // Overpass asks clients to pause about 30 seconds after a refusal such as 429.
 const OVERPASS_COOLDOWN_MS = 30000;
 const overpassCooldownUntil = new Map();
@@ -274,7 +274,7 @@ function buildOverpassQuery(target) {
   // Roads keep their line geometry so the nearest road is measured to the road
   // itself. Facilities are returned one by one (not as server totals) so each
   // count follows the "count distinct mapped features" rule.
-  return `[out:json][timeout:25];
+  return `[out:json][timeout:25][maxsize:33554432];
 way(around:${roadRadius},${lat},${lon})["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|service|living_street|road)(_link)?$"];
 out geom;
 (
@@ -300,16 +300,27 @@ function overpassHost(endpoint) {
 }
 
 async function requestOverpassElements(fetchImpl, endpoint, body, signal) {
-  const response = await fetchImpl(endpoint, {
-    method: "POST",
+  const requestUrl = new URL(endpoint);
+  requestUrl.searchParams.set("data", new URLSearchParams(body).get("data") || "");
+  let response = await fetchImpl(requestUrl.toString(), {
+    method: "GET",
     headers: {
       "Accept": "application/json",
       "Accept-Language": "en",
-      "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
     },
-    body,
+    referrerPolicy: "strict-origin-when-cross-origin",
     signal,
   });
+  // Only method/URL-size refusals justify a POST fallback. Busy/rate-limited
+  // servers retain the existing cooldown and move to a different mirror.
+  if ([405, 414].includes(response.status)) {
+    response = await fetchImpl(endpoint, {
+      method: "POST",
+      headers: { "Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+      body,
+      signal,
+    });
+  }
   if (!response.ok) {
     const error = new Error(`returned ${response.status}`);
     error.status = response.status;

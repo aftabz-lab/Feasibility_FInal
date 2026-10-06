@@ -153,7 +153,7 @@ function resolvedAssessment(payload, target) {
   };
 }
 
-async function assessWithFetch(target, endpoint, timeoutMs = 60000) {
+async function assessWithFetch(target, endpoint, timeoutMs = 120000) {
   if (typeof fetch !== "function") throw new Error("Browser fetch is unavailable.");
   const controller = typeof AbortController === "function" ? new AbortController() : null;
   const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
@@ -174,7 +174,7 @@ async function assessWithFetch(target, endpoint, timeoutMs = 60000) {
   }
 }
 
-function assessWithJsonp(target, endpoint, timeoutMs = 60000) {
+function assessWithJsonp(target, endpoint, timeoutMs = 120000) {
   if (typeof document === "undefined" || !document.head) {
     return Promise.reject(new Error("Google Map assessment requires a browser."));
   }
