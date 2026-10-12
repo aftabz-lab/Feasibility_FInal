@@ -1289,16 +1289,30 @@ function supportSheetRow(rowNumber, cells, height = null) {
 function forecastReferenceMinimumFormula(data, column) {
   const table = data?.reference?.locationDensityReference;
   if (!table?.sheetName || !table.rows?.length) return "NA()";
-  const sheet = `'${String(table.sheetName).replace(/'/g, "''")}'`;
   const last = Math.max(4, Number(table.lastRow || 4));
-  const range = (col) => `${sheet}!$${col}$4:$${col}$${last}`;
-  const metric = range(column);
-  const criteria = `${range("B")},"Commercial Hub",${range("C")},"M",${range("D")},'Sales forecasting tools'!$C$19`;
-  const negatives = `COUNTIFS(${criteria},${metric},"<0")`;
-  const nonnegative = `COUNTIFS(${criteria},${metric},">=0",${metric},"<>")`;
-  // Count numeric candidates before MINIFS so a missing group never becomes 0.
-  // Zero and negative profit are valid source values; exclude blanks/errors.
-  return `IF(${negatives}>0,_xlfn.MINIFS(${metric},${criteria},${metric},"<0"),IF(${nonnegative}>0,_xlfn.MINIFS(${metric},${criteria},${metric},">=0",${metric},"<>"),NA()))`;
+  const helperColumn = { F: "G", G: "H", H: "I", I: "J" }[column];
+  const range = `$${helperColumn}$4:$${helperColumn}$${last}`;
+  // Ordinary scalar helpers keep the same minimum rule in older Excel.
+  // COUNT prevents a missing group becoming zero; MIN retains zero/negative data.
+  return `IF(COUNT(${range})>0,MIN(${range}),NA())`;
+}
+
+function forecastReferenceHelperRows(data) {
+  const table = data?.reference?.locationDensityReference;
+  const helpers = new Map();
+  if (!table?.sheetName || !table.rows?.length) return helpers;
+  const sheet = `'${String(table.sheetName).replace(/'/g, "''")}'`;
+  const columns = [["G", "F", "Monthly sales candidates"], ["H", "G", "Monthly footfall candidates"], ["I", "H", "Basket candidates"], ["J", "I", "Profit candidates"]];
+  helpers.set(3, columns.map(([column, , label]) => supportSheetCell(`${column}3`, label)).join(""));
+  for (let row = 4; row <= Math.max(4, Number(table.lastRow || 4)); row += 1) {
+    const criteria = `${sheet}!$B${row}="Commercial Hub",${sheet}!$C${row}="M",${sheet}!$D${row}='Sales forecasting tools'!$C$19`;
+    helpers.set(row, columns.map(([column, sourceColumn]) => {
+      const value = `${sheet}!${sourceColumn}${row}`;
+      const formula = `IFERROR(IF(AND(${criteria},ISNUMBER(${value})),${value},""),"")`;
+      return supportSheetCell(`${column}${row}`, "", formula);
+    }).join(""));
+  }
+  return helpers;
 }
 
 function forecastReferenceMinimumCell(address, value, formula) {
@@ -1398,13 +1412,21 @@ function dashboardRulesWorksheetXml(data, model) {
       forecastReferenceMinimumCell(`B${row}`, model?.forecastReference?.minimums?.[field], forecastReferenceMinimumFormula(data, column)),
     ])),
   ];
+  const helperRows = forecastReferenceHelperRows(data);
+  const rowsByNumber = new Map(rows.map((xml) => [Number(xml.match(/<row r="(\d+)"/)?.[1]), xml]));
+  for (const [row, cells] of helperRows) {
+    const existing = rowsByNumber.get(row);
+    rowsByNumber.set(row, existing ? existing.replace("</row>", `${cells}</row>`) : supportSheetRow(row, [cells]));
+  }
+  const worksheetRows = [...rowsByNumber.entries()].sort(([a], [b]) => a - b).map(([, xml]) => xml).join("");
+  const dimension = helperRows.size ? `A1:J${Math.max(32, Number(data.reference.locationDensityReference.lastRow || 4))}` : "A1:E32";
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <dimension ref="A1:E32"/>
+  <dimension ref="${dimension}"/>
   <sheetViews><sheetView showGridLines="0" workbookViewId="0"><selection activeCell="A1" sqref="A1"/></sheetView></sheetViews>
   <sheetFormatPr defaultRowHeight="18"/>
   <cols><col min="1" max="1" width="40" customWidth="1"/><col min="2" max="2" width="24" customWidth="1"/><col min="3" max="3" width="110" customWidth="1"/><col min="4" max="4" width="46" customWidth="1"/><col min="5" max="5" width="32" customWidth="1"/></cols>
-  <sheetData>${rows.join("")}</sheetData>
+  <sheetData>${worksheetRows}</sheetData>
   <mergeCells count="2"><mergeCell ref="A1:E1"/><mergeCell ref="A2:E2"/></mergeCells>
   <pageMargins left="0.25" right="0.25" top="0.35" bottom="0.35" header="0.1" footer="0.1"/>
 </worksheet>`;
@@ -1554,8 +1576,26 @@ function upsertDashboardSupportSheets(zip, data, model) {
 }
 
 function originalReferenceFormula(formula) {
-  // On re-upload, refresh our fallback without repeatedly nesting IFNA.
-  if (!/^IFNA\(/i.test(formula) || !/,\s*'Dashboard Rules'!\$B\$(?:29|30|31|32)(?:\/30)?\s*\)$/i.test(formula)) return formula;
+  // Refresh both the previous IFNA wrapper and our compatible wrapper on re-upload.
+  if (/^IF\(ISNA\(/i.test(formula)) {
+    let depth = 1, quote = "";
+    for (let index = 8; index < formula.length; index += 1) {
+      const char = formula[index];
+      if (quote) {
+        if (char === quote && formula[index + 1] === quote) index += 1;
+        else if (char === quote) quote = "";
+      } else if (char === '"' || char === "'") quote = char;
+      else if (char === "(") depth += 1;
+      else if (char === ")" && --depth === 0) {
+        const source = formula.slice(8, index);
+        const tail = formula.slice(index + 1);
+        if (new RegExp(`^,\\s*'Dashboard Rules'!\\$B\\$(?:29|30|31|32)(?:\\/30)?,`).test(tail) && tail.endsWith(`${source})`)) return source;
+        break;
+      }
+    }
+    return formula;
+  }
+  if (!/^(?:_xlfn\.)?IFNA\(/i.test(formula) || !/,\s*'Dashboard Rules'!\$B\$(?:29|30|31|32)(?:\/30)?\s*\)$/i.test(formula)) return formula;
   let depth = 0, quote = "";
   for (let index = 0; index < formula.length; index += 1) {
     const char = formula[index];
@@ -1565,7 +1605,7 @@ function originalReferenceFormula(formula) {
     } else if (char === '"' || char === "'") quote = char;
     else if (char === "(") depth += 1;
     else if (char === ")") depth -= 1;
-    else if (char === "," && depth === 1) return formula.slice(5, index);
+    else if (char === "," && depth === 1) return formula.slice(formula.indexOf("(") + 1, index);
   }
   return formula;
 }
@@ -1587,7 +1627,8 @@ function applyForecastReferenceFallbacks(zip, path, data, model) {
     const formula = cell?.match(/<f\b[^>]*>([\s\S]*?)<\/f>/i)?.[1];
     // A genuine manual value stays a manual value.
     if (!formula) continue;
-    formulas[address] = dashboardFormulaSpec(`IFNA(${originalReferenceFormula(decodeXmlEntities(formula))},${fallback})`, value ?? "#N/A");
+    const source = originalReferenceFormula(decodeXmlEntities(formula));
+    formulas[address] = dashboardFormulaSpec(`IF(ISNA(${source}),${fallback},${source})`, value ?? "#N/A");
   }
   patchWorksheetFormulas(zip, path, formulas);
   let updated = readXmlContent(entry);
@@ -2075,7 +2116,8 @@ function setWorkbookSheetVisibility(workbookXml, visibleSheetNames) {
   });
   output = output.replace(/<calcPr\b[^>]*\/>/i, (calcTag) => {
     let revised = calcTag
-      .replace(/\s+calcMode="[^"]*"/i, "")
+      .replace(/\s+calcMode="[^"]*"/gi, "")
+      .replace(/\s+calcCompleted="[^"]*"/gi, "")
       .replace(/\s+fullCalcOnLoad="[^"]*"/i, "")
       .replace(/\s+forceFullCalc="[^"]*"/i, "");
     // Dashboard inputs change while the three report sheets retain the source
