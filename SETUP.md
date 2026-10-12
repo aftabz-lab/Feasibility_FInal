@@ -1,13 +1,18 @@
-# Excel #NAME? fix
+# Franchisee Commission = GP Share
 
 1. Extract this ZIP.
 2. Open https://github.com/aftabz-lab/Feasibility_FInal on the main branch.
-3. Upload and replace ONLY these three files in the repository root: excel-exporter.js, app.js, index.html. Keep every other file and folder.
-4. Commit the upload and wait for the GitHub Pages deployment to finish.
-5. Open the dashboard, press Ctrl+Shift+R, then click Download Excel with Rules to generate a new Excel file. Files downloaded before this update will still contain the old formulas.
+3. Upload and replace ONLY these four files in the repository root: model.mjs, excel-exporter.js, app.js, index.html.
+4. Commit the changes and wait for the GitHub Pages deployment to finish.
+5. Open the dashboard and press Ctrl+Shift+R. Generate new Excel and PDF downloads; previously downloaded files retain their old rules.
 
-This update replaces the newer reference fallback functions with compatible scalar Excel formulas. The five reference figures and their dependent projected footfall retain the same calculations. The lowest Commercial Hub / M reference is still selected within the chosen Division. Valid exact lookups and manual basket overrides remain unchanged.
+GP Share is the input, with the previous 40% franchise default. Franchisee Commission % uses that same rate in the dashboard, Download 3-page PDF, Management PDF, and downloadable Excel.
 
-The helper calculations stay in the existing hidden Dashboard Rules sheet. Existing worksheet layouts, formatting, formulas outside the corrected reference cells, GP Share / franchise commission rules, financial calculations, signatures, and PDFs are preserved.
+Excel rules:
+- INFORMATION!B7 contains the selected GP Share input.
+- AUTO GENERATED FEASIBILITY!B18 = INFORMATION!B7.
+- AUTO GENERATED FEASIBILITY!B60 retains its existing link to B18.
 
-The app.js and index.html changes only refresh the Excel export module in the browser cache. No PDF, model, stylesheet, signature, map, catchment, source workbook, or other asset is included in this ZIP.
+The prior Excel #NAME? compatibility fix and Commercial Hub / M reference fallback are retained. Other calculation formulas, fonts, formats, page layouts, signatory criteria, signature assets, map calculations, and catchment handling are unchanged. Existing OWN behavior retains a zero commission.
+
+The PDF exporter and stylesheets are not included because their code is unchanged. PDF results receive the corrected rate from the shared model.

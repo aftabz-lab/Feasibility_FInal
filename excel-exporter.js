@@ -1668,8 +1668,7 @@ function clearEditedFeasibilityRows(zip, path) {
 }
 
 function franchiseCommissionFormula() {
-  // INFORMATION!B7 links to B18; retain the original lookup key separately.
-  return `IF(Master!C4="FR",VLOOKUP('${DASHBOARD_RULES_SHEET_NAME}'!$B$28,'${FR_COMMISSION_SHEET_NAME}'!B:E,4,),0)`;
+  return "INFORMATION!B7";
 }
 
 function editedFeasibilityFormulas(model) {
@@ -2575,6 +2574,7 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
   );
 
   const informationValues = {
+    B7: Number(model?.inputs?.gpShare ?? 0),
     // Preserve B9=B8*30 so daily and monthly sales are always one rule.
     B9: undefined,
     B13: Number(data?.information?.otherIncomeRate || 0),
@@ -2596,9 +2596,6 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     F22: Number(staffById(data, "cleaner").salary || 0),
   };
   patchWorksheetValues(zip, paths.get("INFORMATION"), informationValues);
-  patchWorksheetFormulas(zip, paths.get("INFORMATION"), {
-    B7: dashboardFormulaSpec("'AUTO GENERATED FEASIBILITY'!B18", Number(model?.inputs?.franchiseCommissionRate ?? 0)),
-  });
   const manpowerAuto = data?.information?.manpowerAuto !== false;
   const manpowerRows = [
     [7, "om"], [8, "icmo"], [9, "duty"],

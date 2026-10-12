@@ -858,10 +858,8 @@ export function calculateModel(data) {
   const decorationCostIsAuto = optionalNumber(info.decorationCostOverride) === null
     || optionalNumber(info.decorationCostOverride) === undefined;
   const isFranchise = String(project.frOwn).toUpperCase() === "FR";
-  const franchiseCommissionRate = isFranchise
-    ? lookupFranchiseCommissionRate(gpShareLookup, data.reference.franchiseCommissionTable)
-    : 0;
-  const gpShare = franchiseCommissionRate;
+  const gpShare = isFranchise ? gpShareLookup : 0;
+  const franchiseCommissionRate = gpShare;
   const growth = [advanced.salesGrowthYear2, advanced.salesGrowthYear3, advanced.salesGrowthYear4, advanced.salesGrowthYear5];
 
   const sales = annualMonthly(monthlySales, growth);
@@ -1214,7 +1212,7 @@ export function calculateModel(data) {
     },
     sources: {
       gpPercent: gpPercentOverride === null ? `Auto lookup: ${key}` : "Manual override",
-      gpShare: gpShareOverride === null ? (isFranchise ? "Auto: franchisee commission %" : "Auto: OWN model (0%)") : "Manual override",
+      gpShare: gpShareOverride === null ? (isFranchise ? `Auto: FR model (${formatPercent(gpShare, 1)})` : "Auto: OWN model (0%)") : "Manual override",
       areaOutsideDhaka: `Auto from Division: ${project.division || "Not set"}`,
     },
     alerts: {
@@ -1394,12 +1392,14 @@ export function extractFromWorkbook(workbook, sourceName = "Imported workbook") 
       Math.abs(Number(importedDecoration) - ruleValue) < 1 ? null : Number(importedDecoration);
   }
   data.reference.autoGpPercent = pickNumber(get(informationSheet, "B10") ?? get(forecastSheet, editedLayout ? "C21" : "C23"), data.reference.autoGpPercent);
-  // A downloaded workbook links INFORMATION!B7 to the commission result.
-  // Reuse the preserved lookup key instead of feeding that result back in.
-  const commissionLookupShare = get("Dashboard Rules", "A28") === "Franchise commission lookup share"
+  // Older downloads linked B7 to the derived commission. Recover their saved
+  // GP Share input; new downloads use INFORMATION!B7 as the authoritative rate.
+  const importedShareCell = workbook.Sheets[informationSheet]?.B7;
+  const commissionLinked = /^=?'?AUTO GENERATED FEASIBILITY'?!\$?B\$?18$/i.test(String(importedShareCell?.f || "").trim());
+  const importedGpShare = commissionLinked && get("Dashboard Rules", "A28") === "Franchise commission lookup share"
     ? get("Dashboard Rules", "B28")
-    : get(informationSheet, "B7");
-  data.reference.autoGpShareFr = pickNumber(commissionLookupShare, data.reference.autoGpShareFr);
+    : importedShareCell?.t === "e" ? null : get(informationSheet, "B7");
+  if (data.project.frOwn === "FR") data.reference.autoGpShareFr = pickNumber(importedGpShare, data.reference.autoGpShareFr);
   const commissionSheet = workbook.Sheets[FR_COMMISSION_SHEET_NAME];
   if (commissionSheet) {
     const rows = [];
