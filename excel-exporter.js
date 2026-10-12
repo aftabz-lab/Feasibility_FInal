@@ -1294,7 +1294,19 @@ function forecastReferenceMinimumFormula(data, column) {
   const range = `$${helperColumn}$4:$${helperColumn}$${last}`;
   // Ordinary scalar helpers keep the same minimum rule in older Excel.
   // COUNT prevents a missing group becoming zero; MIN retains zero/negative data.
-  return `IF(COUNT(${range})>0,MIN(${range}),NA())`;
+  return `IFERROR(${forecastReferenceAggregateFormula(data, column, "'Sales forecasting tools'!$C$19")},IF(COUNT(${range})>0,MIN(${range}),NA()))`;
+}
+
+// Self-contained "lowest Commercial Hub-M in the selected Division" rule.
+// AGGREGATE(15,6,...) = SMALL ignoring errors, so non-matching rows (divide by
+// zero) and blank/text cells drop out without helper cells or Ctrl+Shift+Enter.
+function forecastReferenceAggregateFormula(data, column, divisionCell = "$C$19") {
+  const table = data?.reference?.locationDensityReference;
+  if (!table?.sheetName || !table.rows?.length) return "NA()";
+  const last = Math.max(4, Number(table.lastRow || 4));
+  const sheet = `'${String(table.sheetName).replace(/'/g, "''")}'`;
+  const range = (col) => `${sheet}!$${col}$4:$${col}$${last}`;
+  return `_xlfn.AGGREGATE(15,6,${range(column)}/((${range("B")}="Commercial Hub")*(${range("C")}="M")*(${range("D")}=${divisionCell})*ISNUMBER(${range(column)})),1)`;
 }
 
 function forecastReferenceHelperRows(data) {
@@ -1576,6 +1588,25 @@ function upsertDashboardSupportSheets(zip, data, model) {
 }
 
 function originalReferenceFormula(formula) {
+  // Current wrapper: IFERROR(source, lowest Commercial Hub-M AGGREGATE).
+  if (/^IFERROR\(/i.test(formula) && /,_xlfn\.AGGREGATE\(15,6,[^]*\)(?:\/30)?\)$/i.test(formula)) {
+    let depth = 0, quote = "";
+    for (let index = 0; index < formula.length; index += 1) {
+      const char = formula[index];
+      if (quote) {
+        if (char === quote && formula[index + 1] === quote) index += 1;
+        else if (char === quote) quote = "";
+      } else if (char === '"' || char === "'") quote = char;
+      else if (char === "(") depth += 1;
+      else if (char === ")") depth -= 1;
+      else if (char === "," && depth === 1) {
+        const tail = formula.slice(index + 1);
+        if (/^_xlfn\.AGGREGATE\(15,6,/i.test(tail)) return originalReferenceFormula(formula.slice(8, index));
+        break;
+      }
+    }
+    return formula;
+  }
   // Refresh both the previous IFNA wrapper and our compatible wrapper on re-upload.
   if (/^IF\(ISNA\(/i.test(formula)) {
     let depth = 1, quote = "";
@@ -1614,13 +1645,14 @@ function applyForecastReferenceFallbacks(zip, path, data, model) {
   const entry = zipEntry(zip, path);
   const xml = readXmlContent(entry);
   const reference = model?.forecastReference || {};
+  const lowest = (column) => forecastReferenceAggregateFormula(data, column);
   const targets = [
-    ["C23", "'Dashboard Rules'!$B$29/30", reference.salesPerDay],
-    ["C24", "'Dashboard Rules'!$B$30/30", reference.footfallPerDay],
-    ["C25", "'Dashboard Rules'!$B$31", reference.basket],
-    ["C26", "'Dashboard Rules'!$B$32", reference.profit],
+    ["C23", `${lowest("F")}/30`, reference.salesPerDay],
+    ["C24", `${lowest("G")}/30`, reference.footfallPerDay],
+    ["C25", lowest("H"), reference.basket],
+    ["C26", lowest("I"), reference.profit],
   ];
-  if (optionalWorkbookValue(data?.information?.basketSizeOverride) === undefined) targets.push(["C28", "'Dashboard Rules'!$B$31", reference.projectedBasketSize]);
+  if (optionalWorkbookValue(data?.information?.basketSizeOverride) === undefined) targets.push(["C28", lowest("H"), reference.projectedBasketSize]);
   const formulas = {};
   for (const [address, fallback, value] of targets) {
     const cell = xml.match(new RegExp(`<c\\b(?=[^>]*\\br="${address}")(?![^>]*\\/>)[^>]*>[\\s\\S]*?<\\/c>`, "i"))?.[0];
@@ -1628,7 +1660,8 @@ function applyForecastReferenceFallbacks(zip, path, data, model) {
     // A genuine manual value stays a manual value.
     if (!formula) continue;
     const source = originalReferenceFormula(decodeXmlEntities(formula));
-    formulas[address] = dashboardFormulaSpec(`IF(ISNA(${source}),${fallback},${source})`, value ?? "#N/A");
+    // IFERROR (not only ISNA) so #N/A, #DIV/0! or blank-lookup errors all use the rule.
+    formulas[address] = dashboardFormulaSpec(`IFERROR(${source},${fallback})`, value ?? "#N/A");
   }
   patchWorksheetFormulas(zip, path, formulas);
   let updated = readXmlContent(entry);
