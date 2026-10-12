@@ -743,13 +743,14 @@ async function saveBlobToLaptop(blob, fileName, saveHandlePromise) {
   return "browser-download";
 }
 
+// The rules template is stored in code (data/rules-template.js), not as an
+// .xlsx file; it is imported only when the Excel with Rules is downloaded.
 async function getConfiguredRulesWorkbook() {
-  const manifestResponse = await fetch("./data/workbook-manifest.json", { cache: "no-store" });
-  const manifest = manifestResponse.ok ? await manifestResponse.json() : { source: "source-workbook.xlsx" };
-  const sourceName = String(manifest.source || "source-workbook.xlsx");
-  const response = await fetch(`./data/${encodeURIComponent(sourceName)}`, { cache: "no-store" });
-  if (!response.ok) throw new Error(`Could not read ${sourceName}`);
-  return { buffer: await response.arrayBuffer(), sourceName };
+  const { RULES_TEMPLATE_BASE64, RULES_TEMPLATE_NAME } = await import("./data/rules-template.js?v=feasibility-no-source-xlsx-v38-20261012");
+  const binary = atob(RULES_TEMPLATE_BASE64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return { buffer: bytes.buffer, sourceName: RULES_TEMPLATE_NAME };
 }
 
 /*

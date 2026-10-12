@@ -24,7 +24,8 @@ import {
   outletsWithinRadius,
 } from "./geo-outlets.js?v=feasibility-assessment-get-v30";
 import { assessGoogleMapLocation, resolveGoogleMapsLink } from "./map-link-resolver.js?v=feasibility-assessment-get-v30";
-import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-reference-baseline-v37-20261012";
+import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-no-source-xlsx-v38-20261012";
+import { BASELINE_DATA } from "./data/baseline-data.js?v=feasibility-no-source-xlsx-v38-20261012";
 import { downloadFeasibilityPdf, downloadManagementFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-forecast-reference-v33-20261012";
 import { readCatchmentWorkbook } from "./catchment-pdf.js?v=feasibility-commission-catchment-v31";
 
@@ -1064,7 +1065,7 @@ function renderFeasibility() {
 }
 
 function renderHelp() {
-  return `<section class="page help-page"><div class="page-title-row"><div><p class="eyebrow">GitHub-ready package</p><h2>How to use this dashboard</h2><p class="page-subtitle">No server or database is needed.</p></div></div><div class="guide-grid"><article class="panel"><span class="step-number">1</span><h3>Upload the package</h3><p>Create a new GitHub repository, upload all extracted files, then use GitHub Pages from the <strong>main</strong> branch root.</p></article><article class="panel"><span class="step-number">2</span><h3>Replace Excel any time</h3><p>Use <strong>Load Excel</strong> in the dashboard for any filename. For a permanent repository source, replace <code>data/source-workbook.xlsx</code> or update <code>data/workbook-manifest.json</code>.</p></article><article class="panel"><span class="step-number">3</span><h3>Add signatures</h3><p>Put a PNG/JPG in <code>signs/</code>, add it to <code>signs/manifest.json</code>, then select it from Data Entry. Each signature is centred across a dashed signature line.</p></article><article class="panel"><span class="step-number">4</span><h3>Download output</h3><p>The rules Excel links forecast selections to a hidden <code>Dashboard Rules</code> sheet and adds an <code>Existing outlets within 1 KM</code> detail sheet. The PDF remains exactly three pages.</p></article></div><article class="panel compatibility-panel"><h3>Compatible workbook requirement</h3><p>To load a replacement source correctly, retain the three output sheet names and their same data layout. Existing reference sheets remain hidden and untouched in the rules workbook.</p></article></section>`;
+  return `<section class="page help-page"><div class="page-title-row"><div><p class="eyebrow">GitHub-ready package</p><h2>How to use this dashboard</h2><p class="page-subtitle">No server or database is needed.</p></div></div><div class="guide-grid"><article class="panel"><span class="step-number">1</span><h3>Upload the package</h3><p>Create a new GitHub repository, upload all extracted files, then use GitHub Pages from the <strong>main</strong> branch root.</p></article><article class="panel"><span class="step-number">2</span><h3>Replace Excel any time</h3><p>Use <strong>Load Excel</strong> in the dashboard for any filename. The permanent baseline is stored in <code>data/baseline-data.js</code> and the Excel with Rules template in <code>data/rules-template.js</code>, so no Excel file is needed in the repository.</p></article><article class="panel"><span class="step-number">3</span><h3>Add signatures</h3><p>Put a PNG/JPG in <code>signs/</code>, add it to <code>signs/manifest.json</code>, then select it from Data Entry. Each signature is centred across a dashed signature line.</p></article><article class="panel"><span class="step-number">4</span><h3>Download output</h3><p>The rules Excel links forecast selections to a hidden <code>Dashboard Rules</code> sheet and adds an <code>Existing outlets within 1 KM</code> detail sheet. The PDF remains exactly three pages.</p></article></div><article class="panel compatibility-panel"><h3>Compatible workbook requirement</h3><p>To load a replacement source correctly, retain the three output sheet names and their same data layout. Existing reference sheets remain hidden and untouched in the rules workbook.</p></article></section>`;
 }
 
 function renderContent() {
@@ -1219,6 +1220,11 @@ async function loadWorkbookFromBuffer(buffer, sourceName) {
   if (!globalThis.XLSX) throw new Error("Excel import module did not load. Refresh and try again.");
   const workbook = XLSX.read(buffer, { type: "array", cellFormula: true, cellStyles: false, cellNF: true });
   const importedData = extractFromWorkbook(workbook, sourceName);
+  applyLoadedData(importedData, buffer, sourceName);
+}
+
+// Shared by an uploaded Excel and the built-in baseline (data/baseline-data.js).
+function applyLoadedData(importedData, buffer, sourceName) {
   calculateModel(importedData); // Validate the new commission lookup before replacing the active workbook.
   if (buffer instanceof ArrayBuffer) {
     state.rulesWorkbook = { buffer: buffer.slice(0), sourceName };
@@ -1232,12 +1238,12 @@ async function loadWorkbookFromBuffer(buffer, sourceName) {
 
 async function loadConfiguredSource() {
   try {
-    const manifestResponse = await fetch("./data/workbook-manifest.json", { cache: "no-store" });
-    const manifest = manifestResponse.ok ? await manifestResponse.json() : { source: "source-workbook.xlsx" };
-    const source = manifest.source || "source-workbook.xlsx";
-    const workbookResponse = await fetch(`./data/${encodeURIComponent(source)}`, { cache: "no-store" });
-    if (!workbookResponse.ok) throw new Error(`Could not read ${source}`);
-    await loadWorkbookFromBuffer(await workbookResponse.arrayBuffer(), source);
+    // No Excel file is fetched: the baseline that used to be read from
+    // data/source-workbook.xlsx is stored in data/baseline-data.js, and the
+    // Excel with Rules template in data/rules-template.js (loaded on download).
+    const baselineData = cloneData(BASELINE_DATA);
+    baselineData.meta = { ...baselineData.meta, loadedAt: new Date().toISOString() };
+    applyLoadedData(baselineData, null, baselineData.meta.sourceName);
     clearInitialSelections(state.data);
     recalculate();
     state.status = { kind: "ready", message: "Baseline workbook loaded. You can now edit any driver." };
