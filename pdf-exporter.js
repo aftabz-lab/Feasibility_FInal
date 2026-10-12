@@ -1,4 +1,4 @@
-import { formatMoney, formatPercent } from "./model.mjs?v=feasibility-commission-catchment-v31";
+import { formatMoney, formatPercent } from "./model.mjs?v=feasibility-forecast-reference-v33-20261012";
 import { appendCatchmentPage } from "./catchment-pdf.js?v=feasibility-commission-catchment-v31";
 
 /* global jspdf */
@@ -251,6 +251,8 @@ async function drawPageReviewSignature(doc, model, assets, position = {}) {
 }
 
 async function drawForecastPage(doc, data, model, assets, exportedAt, options = {}) {
+  const reference = model.forecastReference;
+  const referenceMoney = (value, decimals = 0) => value === null || value === undefined ? "#N/A" : formatMoney(value, decimals);
   const pageWidth = doc.internal.pageSize.getWidth();
   let y = drawPageHeader(doc, "SALES FORECASTING TOOLS", "Values-only feasibility output", sourceLabel(model, data), "Page 1 of 3 · Landscape", exportedAt);
   const margin = 26;
@@ -310,11 +312,11 @@ async function drawForecastPage(doc, data, model, assets, exportedAt, options = 
     ["P&P (Y or N)", data.project.pnp],
     ["GP%", formatPercent(model.inputs.gpPercent, 2)],
     ["Area Out of Dhaka (Y/N)", model.inputs.areaOutsideDhaka],
-    ["Sales (Reference) / Day", formatMoney(data.reference.referenceSalesPerDay)],
-    ["FF (Reference) / Day", formatMoney(data.reference.referenceFootfall, 1)],
-    ["Basket (Reference)", formatMoney(data.reference.referenceBasket, 1)],
-    ["Profit (Reference)", formatMoney(data.reference.referenceProfit)],
-    ["Projected Basket Size (Reference)", formatMoney(model.inputs.basketSize, 1), "input"],
+    ["Sales (Reference) / Day", referenceMoney(reference.salesPerDay)],
+    ["FF (Reference) / Day", referenceMoney(reference.footfallPerDay, 1)],
+    ["Basket (Reference)", referenceMoney(reference.basket, 1)],
+    ["Profit (Reference)", referenceMoney(reference.profit)],
+    ["Projected Basket Size (Reference)", referenceMoney(reference.projectedBasketSize, 1), "input"],
     ["Projected Per Day Sales for this New Location", formatMoney(model.inputs.dailySales), "input"],
     ["Projected Daily Footfall for this New Location", formatMoney(model.inputs.dailyFootfall, 1), "input"],
   ];

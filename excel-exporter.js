@@ -1,5 +1,5 @@
 /* global ExcelJS */
-import { FR_COMMISSION_REFERENCE_ROWS, FR_COMMISSION_SHEET_NAME } from "./model.mjs?v=feasibility-gp-share-commission-v32-20261012";
+import { FR_COMMISSION_REFERENCE_ROWS, FR_COMMISSION_SHEET_NAME } from "./model.mjs?v=feasibility-forecast-reference-v33-20261012";
 
 const COLORS = {
   navy: "17324D",
@@ -425,10 +425,10 @@ async function addScoreSheet(workbook, data, model, assets, exportedAt) {
     ["GP% source", model.sources.gpPercent, "text"],
     ["GP Share", model.inputs.gpShare, "percent"],
     ["GP Share source", model.sources.gpShare, "text"],
-    ["Sales (Reference)/Day", data.reference.referenceSalesPerDay, "currency"],
-    ["FF (Reference)/Day", data.reference.referenceFootfall, "number"],
-    ["Basket (Reference)", data.reference.referenceBasket, "number"],
-    ["Projected Basket Size", model.inputs.basketSize, "number"],
+    ["Sales (Reference)/Day", model.forecastReference.salesPerDay, "currency"],
+    ["FF (Reference)/Day", model.forecastReference.footfallPerDay, "number"],
+    ["Basket (Reference)", model.forecastReference.basket, "number"],
+    ["Projected Basket Size", model.forecastReference.projectedBasketSize, "number"],
     ["Projected Per Day Sales", model.inputs.dailySales, "currency"],
     ["Projected Daily Footfall", model.inputs.dailyFootfall, "number"],
   ];
@@ -1286,6 +1286,26 @@ function supportSheetRow(rowNumber, cells, height = null) {
   return `<row r="${rowNumber}"${heightAttributes}>${cells.join("")}</row>`;
 }
 
+function forecastReferenceMinimumFormula(data, column) {
+  const table = data?.reference?.locationDensityReference;
+  if (!table?.sheetName || !table.rows?.length) return "NA()";
+  const sheet = `'${String(table.sheetName).replace(/'/g, "''")}'`;
+  const last = Math.max(4, Number(table.lastRow || 4));
+  const range = (col) => `${sheet}!$${col}$4:$${col}$${last}`;
+  const metric = range(column);
+  const criteria = `${range("B")},"Commercial Hub",${range("C")},"M",${range("D")},'Sales forecasting tools'!$C$19`;
+  const negatives = `COUNTIFS(${criteria},${metric},"<0")`;
+  const nonnegative = `COUNTIFS(${criteria},${metric},">=0",${metric},"<>")`;
+  // Count numeric candidates before MINIFS so a missing group never becomes 0.
+  // Zero and negative profit are valid source values; exclude blanks/errors.
+  return `IF(${negatives}>0,_xlfn.MINIFS(${metric},${criteria},${metric},"<0"),IF(${nonnegative}>0,_xlfn.MINIFS(${metric},${criteria},${metric},">=0",${metric},"<>"),NA()))`;
+}
+
+function forecastReferenceMinimumCell(address, value, formula) {
+  const xml = supportSheetCell(address, value ?? "#N/A", formula);
+  return value === null || value === undefined ? xml.replace(' t="str"', ' t="e"') : xml;
+}
+
 function dashboardRulesWorksheetXml(data, model) {
   const assessment = data?.locationAssessment || {};
   const forecast = data?.forecast || {};
@@ -1373,10 +1393,14 @@ function dashboardRulesWorksheetXml(data, model) {
     supportSheetRow(26, [supportSheetCell("A26", "Rule version"), supportSheetCell("B26", assessment.ruleVersion || "openstreetmap-overpass-v1")]),
     supportSheetRow(27, [supportSheetCell("A27", "Assessment time (UTC)"), supportSheetCell("B27", assessment.checkedAt || "")]),
     supportSheetRow(28, [supportSheetCell("A28", "Franchise commission lookup share"), supportSheetCell("B28", Number(model?.inputs?.gpShareLookup ?? data?.reference?.autoGpShareFr ?? 0))]),
+    ...[[29, "Monthly sales", "F", "monthlySales"], [30, "Monthly footfall", "G", "monthlyFootfall"], [31, "Basket", "H", "basket"], [32, "Profit", "I", "profit"]].map(([row, label, column, field]) => supportSheetRow(row, [
+      supportSheetCell(`A${row}`, `${label}: lowest Commercial Hub-M in selected Division`),
+      forecastReferenceMinimumCell(`B${row}`, model?.forecastReference?.minimums?.[field], forecastReferenceMinimumFormula(data, column)),
+    ])),
   ];
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <dimension ref="A1:E28"/>
+  <dimension ref="A1:E32"/>
   <sheetViews><sheetView showGridLines="0" workbookViewId="0"><selection activeCell="A1" sqref="A1"/></sheetView></sheetViews>
   <sheetFormatPr defaultRowHeight="18"/>
   <cols><col min="1" max="1" width="40" customWidth="1"/><col min="2" max="2" width="24" customWidth="1"/><col min="3" max="3" width="110" customWidth="1"/><col min="4" max="4" width="46" customWidth="1"/><col min="5" max="5" width="32" customWidth="1"/></cols>
@@ -1527,6 +1551,51 @@ function upsertDashboardSupportSheets(zip, data, model) {
   ensureWorksheetPart(zip, DASHBOARD_RULES_SHEET_NAME, dashboardRulesWorksheetXml(data, model), true);
   ensureWorksheetPart(zip, EXISTING_OUTLETS_SHEET_NAME, existingOutletsWorksheetXml(data), data?.project?.includeExistingOutlets !== true);
   synchronizeExtendedWorksheetProperties(zip);
+}
+
+function originalReferenceFormula(formula) {
+  // On re-upload, refresh our fallback without repeatedly nesting IFNA.
+  if (!/^IFNA\(/i.test(formula) || !/,\s*'Dashboard Rules'!\$B\$(?:29|30|31|32)(?:\/30)?\s*\)$/i.test(formula)) return formula;
+  let depth = 0, quote = "";
+  for (let index = 0; index < formula.length; index += 1) {
+    const char = formula[index];
+    if (quote) {
+      if (char === quote && formula[index + 1] === quote) index += 1;
+      else if (char === quote) quote = "";
+    } else if (char === '"' || char === "'") quote = char;
+    else if (char === "(") depth += 1;
+    else if (char === ")") depth -= 1;
+    else if (char === "," && depth === 1) return formula.slice(5, index);
+  }
+  return formula;
+}
+
+function applyForecastReferenceFallbacks(zip, path, data, model) {
+  const entry = zipEntry(zip, path);
+  const xml = readXmlContent(entry);
+  const reference = model?.forecastReference || {};
+  const targets = [
+    ["C23", "'Dashboard Rules'!$B$29/30", reference.salesPerDay],
+    ["C24", "'Dashboard Rules'!$B$30/30", reference.footfallPerDay],
+    ["C25", "'Dashboard Rules'!$B$31", reference.basket],
+    ["C26", "'Dashboard Rules'!$B$32", reference.profit],
+  ];
+  if (optionalWorkbookValue(data?.information?.basketSizeOverride) === undefined) targets.push(["C28", "'Dashboard Rules'!$B$31", reference.projectedBasketSize]);
+  const formulas = {};
+  for (const [address, fallback, value] of targets) {
+    const cell = xml.match(new RegExp(`<c\\b(?=[^>]*\\br="${address}")(?![^>]*\\/>)[^>]*>[\\s\\S]*?<\\/c>`, "i"))?.[0];
+    const formula = cell?.match(/<f\b[^>]*>([\s\S]*?)<\/f>/i)?.[1];
+    // A genuine manual value stays a manual value.
+    if (!formula) continue;
+    formulas[address] = dashboardFormulaSpec(`IFNA(${originalReferenceFormula(decodeXmlEntities(formula))},${fallback})`, value ?? "#N/A");
+  }
+  patchWorksheetFormulas(zip, path, formulas);
+  let updated = readXmlContent(entry);
+  for (const [address, spec] of Object.entries(formulas)) if (spec.value === "#N/A") {
+    const pattern = new RegExp(`(<c\\b(?=[^>]*\\br="${address}")[^>]*)(>[\\s\\S]*?<\\/c>)`, "i");
+    updated = updated.replace(pattern, (_, tag, body) => tag.replace(/\s+t="[^"]*"/i, ' t="e"') + body);
+  }
+  writeXmlContent(entry, updated);
 }
 
 function upsertFranchiseCommissionSheet(zip, data) {
@@ -2403,6 +2472,7 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
   patchWorksheetValues(zip, paths.get("Sales forecasting tools"), forecastValues);
 
   const forecastFormulaCaches = {
+    B43: model?.forecastReference?.key ?? "",
     C18: data?.project?.locationArea ?? "",
     C19: data?.project?.division ?? "",
     C20: data?.project?.pnp ?? "",
@@ -2412,10 +2482,10 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     F5: data?.project?.incomeLevel ?? "",
     E6: data?.project?.locationType ?? "",
     F13: Number(data?.project?.longFeet || 0),
-    C23: Number(data?.reference?.referenceSalesPerDay || 0),
-    C24: Number(data?.reference?.referenceFootfall || 0),
-    C25: Number(data?.reference?.referenceBasket || 0),
-    C26: Number(data?.reference?.referenceProfit || 0),
+    C23: model?.forecastReference?.salesPerDay ?? "#N/A",
+    C24: model?.forecastReference?.footfallPerDay ?? "#N/A",
+    C25: model?.forecastReference?.basket ?? "#N/A",
+    C26: model?.forecastReference?.profit ?? "#N/A",
     C29: Number(model?.inputs?.dailySales || 0),
     C30: Number(model?.inputs?.dailyFootfall || 0),
     H37: Number(model?.inputs?.dailySales || 0),
@@ -2427,7 +2497,7 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     forecastFormulaCaches.C21 = Number(model?.inputs?.gpPercent || 0);
   }
   if (optionalWorkbookValue(data?.information?.basketSizeOverride) === undefined) {
-    forecastFormulaCaches.C28 = Number(model?.inputs?.basketSize || 0);
+    forecastFormulaCaches.C28 = model?.forecastReference?.projectedBasketSize ?? "#N/A";
   }
   if (optionalWorkbookValue(data?.information?.footfallOverride) === undefined) {
     forecastFormulaCaches.C30 = Number(model?.inputs?.dailyFootfall || 0);
@@ -2454,6 +2524,7 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     paths.get("Sales forecasting tools"),
     { ...forecastFormulaCaches, ...forecastCalculatedFormulaCaches },
   );
+  applyForecastReferenceFallbacks(zip, paths.get("Sales forecasting tools"), data, model);
   setWorksheetRowsHidden(
     zip,
     paths.get("Sales forecasting tools"),

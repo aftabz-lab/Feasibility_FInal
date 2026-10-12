@@ -491,6 +491,7 @@ export const defaultData = {
     terminalRecovery: 3000000,
   },
   reference: {
+    locationDensityReference: { sheetName: null, lastRow: 0, rows: [] },
     gpLookup: {},
     basketLookup: {},
     writeOffLookup: {},
@@ -681,6 +682,42 @@ function getGpKey(data) {
   return `${division} ${ownership} ${pnpLabel}`.replace(/\s+/g, " ").trim();
 }
 
+export function getForecastReference(data) {
+  const project = data.project || {};
+  const source = data.reference?.locationDensityReference || {};
+  const rows = source.rows || [];
+  const key = `${project.locationType || ""}${project.density || ""}${project.division || ""}`;
+  const exact = rows.find((row) => String(row.key || "").toLowerCase() === key.toLowerCase());
+  const medium = rows.filter((row) => (
+    String(row.locationType || "").trim().toLowerCase().replace(/\s+/g, "") === "commercialhub"
+    && String(row.density || "").trim().toUpperCase() === "M"
+    && normalizedDivision(row.division) === normalizedDivision(project.division)
+    && String(project.division || "").trim() !== ""
+  ));
+  const minimum = (field) => {
+    const values = medium.map((row) => row[field]).filter((value) => typeof value === "number" && Number.isFinite(value));
+    return values.length ? Math.min(...values) : null;
+  };
+  const resolve = (field) => optionalNumber(exact?.[field]) ?? minimum(field);
+  const monthlySales = resolve("monthlySales");
+  const monthlyFootfall = resolve("monthlyFootfall");
+  const salesPerDay = monthlySales === null ? null : monthlySales / 30;
+  const footfallPerDay = monthlyFootfall === null ? null : monthlyFootfall / 30;
+  const basket = salesPerDay !== null && footfallPerDay !== null && footfallPerDay !== 0
+    ? salesPerDay / footfallPerDay
+    : footfallPerDay === 0 ? null : minimum("basket");
+  return {
+    key,
+    salesPerDay,
+    footfallPerDay,
+    basket,
+    profit: resolve("profit"),
+    minimumBasket: minimum("basket"),
+    minimums: { monthlySales: minimum("monthlySales"), monthlyFootfall: minimum("monthlyFootfall"), basket: minimum("basket"), profit: minimum("profit") },
+    usedFallback: ["monthlySales", "monthlyFootfall", "profit"].some((field) => optionalNumber(exact?.[field]) === null && minimum(field) !== null),
+  };
+}
+
 function scoreForLocationType(value) {
   const scores = {
     "Commercial Hub": 85,
@@ -789,8 +826,11 @@ export function calculateModel(data) {
   const areaOutsideDhaka = getAreaOutsideDhakaForDivision(project.division);
   const dhakaClassification = getDhakaClassification(project.division);
   const key = getGpKey(data);
+  const forecastReference = getForecastReference(data);
   const autoGpPercent = optionalNumber(data.reference.gpLookup?.[key]) ?? number(data.reference.autoGpPercent, 0.16);
-  const autoBasketSize = optionalNumber(data.reference.basketLookup?.[key]) ?? number(data.reference.autoBasketSize, 426.76);
+  const basketLookup = optionalNumber(data.reference.basketLookup?.[key]);
+  const hasBasketTable = Object.keys(data.reference.basketLookup || {}).length > 0 || Object.keys(data.reference.gpLookup || {}).length > 0;
+  const autoBasketSize = basketLookup ?? (hasBasketTable ? forecastReference.minimumBasket : null) ?? number(data.reference.autoBasketSize, 426.76);
   const autoStockWriteOffRate = optionalNumber(data.reference.writeOffLookup?.[key])
     ?? number(data.advanced.stockWriteOffRate, 0.0048);
   const stockWriteOffRateValue = optionalNumber(data.advanced.stockWriteOffRateOverride) ?? autoStockWriteOffRate;
@@ -801,6 +841,8 @@ export function calculateModel(data) {
   const monthlySales = optionalNumber(project.monthlySalesOverride) ?? number(project.projectedDailySales) * 30;
   const dailySales = safeDivide(monthlySales, 30, number(project.projectedDailySales));
   const basketSize = optionalNumber(info.basketSizeOverride) ?? autoBasketSize;
+  forecastReference.projectedBasketSize = optionalNumber(info.basketSizeOverride) ?? basketLookup
+    ?? (hasBasketTable ? forecastReference.minimumBasket : basketSize);
   const dailyFootfall = optionalNumber(info.footfallOverride) ?? safeDivide(dailySales, basketSize);
   const cepValue = optionalNumber(info.cepValueOverride) ?? (yes(project.pnp) ? 430000 : 330000);
   // Source workbook rule, INFORMATION!B19:
@@ -1121,6 +1163,7 @@ export function calculateModel(data) {
 
   return {
     key,
+    forecastReference,
     isFranchise,
     modes: {
       gpPercent: gpPercentOverride === null ? "Auto" : "Manual",
@@ -1202,7 +1245,8 @@ function extractLookup(workbook) {
   for (let row = 3; row <= 500; row += 1) {
     const key = getCell(workbook, sheetName, `AB${row}`);
     const gp = optionalNumber(getCell(workbook, sheetName, `AC${row}`));
-    const basket = optionalNumber(getCell(workbook, sheetName, `AD${row}`));
+    const basketCell = workbook?.Sheets?.[sheetName]?.[`AD${row}`];
+    const basket = basketCell?.t === "e" ? null : optionalNumber(basketCell?.v);
     // Column AE is the stock write-off provision rate. The workbook reads it with
     // VLOOKUP on the same "<Division> <FR/OWN> <PNP>" key as GP% and basket size,
     // so it has to move with Division too - importing the cached number instead
@@ -1215,6 +1259,35 @@ function extractLookup(workbook) {
     }
   }
   return { gpLookup, basketLookup, writeOffLookup };
+}
+
+function extractLocationDensityReference(workbook) {
+  const sheetName = (workbook?.SheetNames || Object.keys(workbook?.Sheets || {}))
+    .find((name) => String(name).trim().toLowerCase().startsWith("reference (locationtype & dens"));
+  const sheet = workbook?.Sheets?.[sheetName];
+  if (!sheet) return { sheetName: null, lastRow: 0, rows: [] };
+  const numeric = (address) => {
+    const cell = sheet[address];
+    return cell?.t === "e" || typeof cell?.v === "boolean" ? null : optionalNumber(cell?.v);
+  };
+  const rowNumbers = Object.keys(sheet).filter((address) => /^B\d+$/.test(address))
+    .map((address) => Number(address.slice(1))).filter((row) => row >= 4).sort((a, b) => a - b);
+  const rows = [];
+  for (const row of rowNumbers) {
+    const locationType = String(sheet[`B${row}`]?.v || "");
+    const density = String(sheet[`C${row}`]?.v || "");
+    const division = String(sheet[`D${row}`]?.v || "");
+    if (!locationType.trim() || !density.trim() || !division.trim()) continue;
+    const keyCell = sheet[`E${row}`];
+    rows.push({
+      locationType, density, division,
+      key: keyCell?.t === "e" ? "" : String(keyCell?.v ?? `${locationType}${density}${division}`),
+      monthlySales: numeric(`F${row}`), monthlyFootfall: numeric(`G${row}`),
+      basket: numeric(`H${row}`), profit: numeric(`I${row}`),
+    });
+  }
+  const lastRow = Math.max(4, Number(String(sheet["!ref"] || "").match(/\d+$/)?.[0] || 0), ...rowNumbers);
+  return { sheetName, lastRow, rows };
 }
 
 // Averages Electricity!F by the sheet's own "Unique" key (size band + P&P flag),
@@ -1347,6 +1420,7 @@ export function extractFromWorkbook(workbook, sourceName = "Imported workbook") 
   data.reference.gpLookup = lookup.gpLookup;
   data.reference.basketLookup = lookup.basketLookup;
   data.reference.writeOffLookup = lookup.writeOffLookup;
+  data.reference.locationDensityReference = extractLocationDensityReference(workbook);
 
   const staffAddress = [
     ["om", 7], ["icmo", 8], ["duty", 9], ["cg", 12], ["commodity", 13], ["protein", 14], ["perishables", 15],

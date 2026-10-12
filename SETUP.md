@@ -1,20 +1,14 @@
-# GP Share equals Franchisee Commission %
+# Forecast references update
 
-1. Extract `Feasibility_GP_Share_Commission_Fix_GitHub_Upload.zip`.
-2. Open **https://github.com/aftabz-lab/Feasibility_FInal** → **main** branch → repository root.
-3. Use **Add file → Upload files** and replace only these four files:
-   - `model.mjs`
-   - `excel-exporter.js`
-   - `app.js`
-   - `index.html`
-4. Commit the files and wait for the GitHub Pages deployment to complete successfully.
-5. Open **https://aftabz-lab.github.io/Feasibility_FInal/** and press **Ctrl + Shift + R**.
-6. Generate a fresh **Download Excel with Rules** file. Its formula is:
+1. Extract this ZIP.
+2. Open https://github.com/aftabz-lab/Feasibility_FInal on the main branch.
+3. Upload and replace these five files in the repository root: app.js, model.mjs, excel-exporter.js, pdf-exporter.js, index.html. Do not delete or replace any other files or folders.
+4. Commit the changes, wait for the Pages deployment to finish, then refresh the dashboard with Ctrl+Shift+R.
 
-   `INFORMATION!B7 = 'AUTO GENERATED FEASIBILITY'!B18`
+Sales Forecasting now shows Sales (Reference), FF (Reference)/Day, Basket (Reference), Profit (Reference), and Projected Basket Size (Reference) directly below Weighted score card.
 
-The dashboard GP Share uses that same Franchisee Commission percentage. The existing `Fr Com% vs GP Share%` table and commission calculation are retained. The original lookup selection is stored in row 28 of the existing hidden `Dashboard Rules` sheet so the B7/B18 link has no circular reference and the generated workbook can be loaded again.
+Valid reference lookups remain unchanged. Missing/#N/A location-density-division lookups use the lowest Commercial Hub / M reference within the selected Division. The existing monthly-to-daily conversions and basket calculation remain in place. A valid projected-basket lookup or manual override is retained. A missing Division reference is not replaced with data from another Division.
 
-All unrelated workbook cells, formulas, fonts, formatting, sheet order and visibility remain unchanged. Financial calculations, signatory rules and signs, map rules, nearby-outlet rules, catchment behavior and PDF layouts are preserved. The source workbook and other repository files stay in place.
+The Excel export includes the corresponding fallback formulas, with helper calculations in the existing hidden Dashboard Rules sheet. PDF reference values use the same resolved figures; layouts, fonts, signatures, and signatory rules are preserved. The previous GP Share = Franchisee Commission fix is retained.
 
-Upload the four replacement files listed above. `SETUP.md` is the installation guide.
+This ZIP contains only the five changed runtime files and these instructions. It does not include or replace source workbooks, stylesheets, signatures, catchment files, map configuration, or other assets.
