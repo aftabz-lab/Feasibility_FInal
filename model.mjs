@@ -88,7 +88,7 @@ export const salesGivenByOptions = [
 ];
 
 // Exact B:E reference values supplied in FEASIBILITY_Edited_sir.xlsx.
-// GP share remains the INFORMATION input; commission is its separate lookup.
+// Keep the commission lookup input independent; GP Share follows its result.
 export const FR_COMMISSION_SHEET_NAME = "Fr Com% vs GP Share%";
 export const FR_COMMISSION_REFERENCE_ROWS = Object.freeze([
   [0.4, 216236094.96396768, 81823342.31780863, 0.3783981685918033],
@@ -797,7 +797,7 @@ export function calculateModel(data) {
   const gpPercentOverride = optionalPercentageOverride(project.gpPercentOverride);
   const gpShareOverride = optionalPercentageOverride(project.gpShareOverride);
   const gpPercent = gpPercentOverride ?? autoGpPercent;
-  const gpShare = gpShareOverride ?? (String(project.frOwn).toUpperCase() === "FR" ? number(data.reference.autoGpShareFr, 0.4) : 0);
+  const gpShareLookup = gpShareOverride ?? (String(project.frOwn).toUpperCase() === "FR" ? number(data.reference.autoGpShareFr, 0.4) : 0);
   const monthlySales = optionalNumber(project.monthlySalesOverride) ?? number(project.projectedDailySales) * 30;
   const dailySales = safeDivide(monthlySales, 30, number(project.projectedDailySales));
   const basketSize = optionalNumber(info.basketSizeOverride) ?? autoBasketSize;
@@ -817,8 +817,9 @@ export function calculateModel(data) {
     || optionalNumber(info.decorationCostOverride) === undefined;
   const isFranchise = String(project.frOwn).toUpperCase() === "FR";
   const franchiseCommissionRate = isFranchise
-    ? lookupFranchiseCommissionRate(gpShare, data.reference.franchiseCommissionTable)
+    ? lookupFranchiseCommissionRate(gpShareLookup, data.reference.franchiseCommissionTable)
     : 0;
+  const gpShare = franchiseCommissionRate;
   const growth = [advanced.salesGrowthYear2, advanced.salesGrowthYear3, advanced.salesGrowthYear4, advanced.salesGrowthYear5];
 
   const sales = annualMonthly(monthlySales, growth);
@@ -1132,6 +1133,7 @@ export function calculateModel(data) {
       dailyFootfall,
       gpPercent,
       gpShare,
+      gpShareLookup,
       franchiseCommissionRate,
       cepValue,
       decorationCost: decorationCostValue,
@@ -1169,7 +1171,7 @@ export function calculateModel(data) {
     },
     sources: {
       gpPercent: gpPercentOverride === null ? `Auto lookup: ${key}` : "Manual override",
-      gpShare: gpShareOverride === null ? (isFranchise ? "Auto: source FR GP share" : "Auto: OWN model (0%)") : "Manual override",
+      gpShare: gpShareOverride === null ? (isFranchise ? "Auto: franchisee commission %" : "Auto: OWN model (0%)") : "Manual override",
       areaOutsideDhaka: `Auto from Division: ${project.division || "Not set"}`,
     },
     alerts: {
@@ -1319,7 +1321,12 @@ export function extractFromWorkbook(workbook, sourceName = "Imported workbook") 
       Math.abs(Number(importedDecoration) - ruleValue) < 1 ? null : Number(importedDecoration);
   }
   data.reference.autoGpPercent = pickNumber(get(informationSheet, "B10") ?? get(forecastSheet, editedLayout ? "C21" : "C23"), data.reference.autoGpPercent);
-  data.reference.autoGpShareFr = pickNumber(get(informationSheet, "B7"), data.reference.autoGpShareFr);
+  // A downloaded workbook links INFORMATION!B7 to the commission result.
+  // Reuse the preserved lookup key instead of feeding that result back in.
+  const commissionLookupShare = get("Dashboard Rules", "A28") === "Franchise commission lookup share"
+    ? get("Dashboard Rules", "B28")
+    : get(informationSheet, "B7");
+  data.reference.autoGpShareFr = pickNumber(commissionLookupShare, data.reference.autoGpShareFr);
   const commissionSheet = workbook.Sheets[FR_COMMISSION_SHEET_NAME];
   if (commissionSheet) {
     const rows = [];

@@ -1,5 +1,5 @@
 /* global ExcelJS */
-import { FR_COMMISSION_REFERENCE_ROWS, FR_COMMISSION_SHEET_NAME } from "./model.mjs?v=feasibility-commission-catchment-v31";
+import { FR_COMMISSION_REFERENCE_ROWS, FR_COMMISSION_SHEET_NAME } from "./model.mjs?v=feasibility-gp-share-commission-v32-20261012";
 
 const COLORS = {
   navy: "17324D",
@@ -1286,7 +1286,7 @@ function supportSheetRow(rowNumber, cells, height = null) {
   return `<row r="${rowNumber}"${heightAttributes}>${cells.join("")}</row>`;
 }
 
-function dashboardRulesWorksheetXml(data) {
+function dashboardRulesWorksheetXml(data, model) {
   const assessment = data?.locationAssessment || {};
   const forecast = data?.forecast || {};
   const roadRadius = Number(assessment.roadRadiusM || 150);
@@ -1372,10 +1372,11 @@ function dashboardRulesWorksheetXml(data) {
     supportSheetRow(25, [supportSheetCell("A25", "Map provider"), supportSheetCell("B25", source)]),
     supportSheetRow(26, [supportSheetCell("A26", "Rule version"), supportSheetCell("B26", assessment.ruleVersion || "openstreetmap-overpass-v1")]),
     supportSheetRow(27, [supportSheetCell("A27", "Assessment time (UTC)"), supportSheetCell("B27", assessment.checkedAt || "")]),
+    supportSheetRow(28, [supportSheetCell("A28", "Franchise commission lookup share"), supportSheetCell("B28", Number(model?.inputs?.gpShareLookup ?? data?.reference?.autoGpShareFr ?? 0))]),
   ];
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <dimension ref="A1:E27"/>
+  <dimension ref="A1:E28"/>
   <sheetViews><sheetView showGridLines="0" workbookViewId="0"><selection activeCell="A1" sqref="A1"/></sheetView></sheetViews>
   <sheetFormatPr defaultRowHeight="18"/>
   <cols><col min="1" max="1" width="40" customWidth="1"/><col min="2" max="2" width="24" customWidth="1"/><col min="3" max="3" width="110" customWidth="1"/><col min="4" max="4" width="46" customWidth="1"/><col min="5" max="5" width="32" customWidth="1"/></cols>
@@ -1522,8 +1523,8 @@ function ensureWorksheetPart(zip, sheetName, sheetXml, hidden = false) {
   return sheetPath;
 }
 
-function upsertDashboardSupportSheets(zip, data) {
-  ensureWorksheetPart(zip, DASHBOARD_RULES_SHEET_NAME, dashboardRulesWorksheetXml(data), true);
+function upsertDashboardSupportSheets(zip, data, model) {
+  ensureWorksheetPart(zip, DASHBOARD_RULES_SHEET_NAME, dashboardRulesWorksheetXml(data, model), true);
   ensureWorksheetPart(zip, EXISTING_OUTLETS_SHEET_NAME, existingOutletsWorksheetXml(data), data?.project?.includeExistingOutlets !== true);
   synchronizeExtendedWorksheetProperties(zip);
 }
@@ -1556,9 +1557,14 @@ function clearEditedFeasibilityRows(zip, path) {
   writeXmlContent(entry, xml);
 }
 
+function franchiseCommissionFormula() {
+  // INFORMATION!B7 links to B18; retain the original lookup key separately.
+  return `IF(Master!C4="FR",VLOOKUP('${DASHBOARD_RULES_SHEET_NAME}'!$B$28,'${FR_COMMISSION_SHEET_NAME}'!B:E,4,),0)`;
+}
+
 function editedFeasibilityFormulas(model) {
   const formulas = {
-    B18: dashboardFormulaSpec(`VLOOKUP(INFORMATION!B7,'${FR_COMMISSION_SHEET_NAME}'!B:E,4,)`, model?.inputs?.franchiseCommissionRate ?? 0),
+    B18: dashboardFormulaSpec(franchiseCommissionFormula(), model?.inputs?.franchiseCommissionRate ?? 0),
     B60: dashboardFormulaSpec("B18", model?.inputs?.franchiseCommissionRate ?? 0),
   };
   ["C", "D", "E"].forEach((col) => {
@@ -2137,7 +2143,7 @@ function buildDashboardFeasibilityPatch(data, model) {
   ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}15`, `$B$15*${col}10`)); yearlySum(15);
   ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}16`, `${col}15+${col}13`)); yearlySum(16);
 
-  formula("B18", `VLOOKUP(INFORMATION!B7,'${FR_COMMISSION_SHEET_NAME}'!B:E,4,)`, Number(model?.inputs?.franchiseCommissionRate || 0));
+  formula("B18", franchiseCommissionFormula(), Number(model?.inputs?.franchiseCommissionRate || 0));
   ["C","D","E","G","H","I","J","K"].forEach((col) => formula(`${col}18`, `$B$18*${col}16`)); yearlySum(18);
   yearlySum(19);
 
@@ -2334,7 +2340,7 @@ function buildTemplateFeasibilityInputValues(data, model) {
 export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt, approvalSnapshotPng = null) {
   const cfbApi = getCfbApi();
   const zip = cfbApi.read(asUint8Array(templateBuffer), { type: "array" });
-  upsertDashboardSupportSheets(zip, data);
+  upsertDashboardSupportSheets(zip, data, model);
   upsertFranchiseCommissionSheet(zip, data);
   const { paths, workbookEntry, workbookXml } = worksheetPaths(zip);
   const requiredSheets = [
@@ -2456,7 +2462,6 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
   );
 
   const informationValues = {
-    B7: Number(model?.inputs?.gpShare ?? data?.reference?.autoGpShareFr ?? 0),
     // Preserve B9=B8*30 so daily and monthly sales are always one rule.
     B9: undefined,
     B13: Number(data?.information?.otherIncomeRate || 0),
@@ -2478,6 +2483,9 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     F22: Number(staffById(data, "cleaner").salary || 0),
   };
   patchWorksheetValues(zip, paths.get("INFORMATION"), informationValues);
+  patchWorksheetFormulas(zip, paths.get("INFORMATION"), {
+    B7: dashboardFormulaSpec("'AUTO GENERATED FEASIBILITY'!B18", Number(model?.inputs?.franchiseCommissionRate ?? 0)),
+  });
   const manpowerAuto = data?.information?.manpowerAuto !== false;
   const manpowerRows = [
     [7, "om"], [8, "icmo"], [9, "duty"],

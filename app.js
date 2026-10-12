@@ -14,7 +14,7 @@ import {
   lookupFranchiseCommissionRate,
   openedByOptions,
   salesGivenByOptions,
-} from "./model.mjs?v=feasibility-commission-catchment-v31";
+} from "./model.mjs?v=feasibility-gp-share-commission-v32-20261012";
 import {
   assessLocationEnvironment,
   geocodeLocationArea,
@@ -23,7 +23,7 @@ import {
   outletsWithinRadius,
 } from "./geo-outlets.js?v=feasibility-assessment-get-v30";
 import { assessGoogleMapLocation, resolveGoogleMapsLink } from "./map-link-resolver.js?v=feasibility-assessment-get-v30";
-import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-commission-catchment-v31";
+import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-gp-share-commission-v32-20261012";
 import { downloadFeasibilityPdf, downloadManagementFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-commission-catchment-v31";
 import { readCatchmentWorkbook } from "./catchment-pdf.js?v=feasibility-commission-catchment-v31";
 
