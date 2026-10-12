@@ -2,6 +2,7 @@ import {
   applyAutoManpower,
   manpowerBandLabel,
   calculateModel,
+  carryWorkbookLookupTables,
   cloneData,
   defaultData,
   districtDivisionOptions,
@@ -14,7 +15,7 @@ import {
   lookupFranchiseCommissionRate,
   openedByOptions,
   salesGivenByOptions,
-} from "./model.mjs?v=feasibility-commission-gp-share-v35-20261012";
+} from "./model.mjs?v=feasibility-reference-baseline-v37-20261012";
 import {
   assessLocationEnvironment,
   geocodeLocationArea,
@@ -23,7 +24,7 @@ import {
   outletsWithinRadius,
 } from "./geo-outlets.js?v=feasibility-assessment-get-v30";
 import { assessGoogleMapLocation, resolveGoogleMapsLink } from "./map-link-resolver.js?v=feasibility-assessment-get-v30";
-import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-reference-fallback-v36-20261012";
+import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-reference-baseline-v37-20261012";
 import { downloadFeasibilityPdf, downloadManagementFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-forecast-reference-v33-20261012";
 import { readCatchmentWorkbook } from "./catchment-pdf.js?v=feasibility-commission-catchment-v31";
 
@@ -1462,7 +1463,7 @@ app.addEventListener("click", (event) => {
     render();
   }
   if (actionName === "reset") {
-    state.data = cloneData(defaultData);
+    state.data = carryWorkbookLookupTables(cloneData(defaultData), state.data);
     state.firstFeasibilityEntry = null;
     locationLookupMessage("waiting", "Enter Google Map Location and select District to calculate the 1 KM count.");
     locationAssessmentMessage("waiting", "Enter Google Map Location and select District for automatic assessment.");

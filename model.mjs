@@ -360,6 +360,141 @@ export function applyAutoManpower(data) {
   return data;
 }
 
+// Built-in copy of "Reference (LocationType & Dens " B:I from data/source-workbook.xlsx
+// [Location Type, Density, Division, AVG Sales, AVG FF, AVG BS, AVG Profit].
+// Used only when no workbook Reference table is available (built-in baseline,
+// failed workbook load, or an uploaded file without that sheet), so the
+// Forecast references never go blank. sheetName stays null: Excel formulas are
+// written only against a Reference sheet that really exists in the template.
+const BUILT_IN_LOCATION_DENSITY_ROWS = Object.freeze([
+  ["Commercial Hub","H","Barishal",4387198,7620,575.7477690288714,187701.59062438027],
+  ["Commercial Hub","H","Chattogram",3002746.1428571427,5077.714285714285,591.3578381724061,231129.94394007602],
+  ["Commercial Hub","H","Dhaka",3573803.4375,6517.3125,548.3553899709427,257639.5005627723],
+  ["Commercial Hub","H","DhakaGBUD",1887336,5767,327.2647823825212,89633.5986152569],
+  ["Commercial Hub","H","Mymensingh",2873429.3333333335,5657,507.94225443403457,204543.76496458054],
+  ["Commercial Hub","H","Rajshahi",4299581.428571428,7577,567.4516864948433,345932.6963153067],
+  ["Commercial Hub","H","Rangpur",2622345.3333333335,4846.666666666667,541.0616231086658,68957.55813391386],
+  ["Commercial Hub","L","Barishal",774963.5,2387.25,324.6260341397005,-181.4932565524805],
+  ["Commercial Hub","L","Chattogram",1240578.875,2583.625,480.16986791813827,65745.57195043395],
+  ["Commercial Hub","L","Dhaka",1247453.761904762,3001.095238095238,415.66616949367693,57830.305659656944],
+  ["Commercial Hub","L","Khulna",1709327,3937.75,434.0872325566631,114852.04689641047],
+  ["Commercial Hub","L","Mymensingh",1033326.6,2525,409.2382574257426,20861.937033661998],
+  ["Commercial Hub","L","Rajshahi",1115810,2670.1428571428573,417.8840083462629,40803.00531788128],
+  ["Commercial Hub","L","Rangpur",1187427.4285714286,2968.285714285714,400.0381172393879,49906.51718178068],
+  ["Commercial Hub","L","Sylhet",743721,1602,464.24531835205994,-8258.145036551534],
+  ["Commercial Hub","M","Barishal",969423.1764705882,2754.1176470588234,351.99047415634345,16589.619648938773],
+  ["Commercial Hub","M","Chattogram",1733135.0333333334,3689,469.81161109605137,107748.46720804587],
+  ["Commercial Hub","M","Dhaka",1846852.0806451612,4162.3387096774195,443.7053804274117,112043.44771317618],
+  ["Commercial Hub","M","DhakaGBUD",1069204,3194,334.7539135879775,-82995.32753952077],
+  ["Commercial Hub","M","Khulna",1359499.2,3361.2,404.4684041413781,58187.884841119245],
+  ["Commercial Hub","M","Mymensingh",1469241.5,3572.5,411.26424072778167,55847.57154692778],
+  ["Commercial Hub","M","Rajshahi",1462370,3678.4,397.55600260983033,66256.31919749579],
+  ["Commercial Hub","M","Rangpur",1477614.5882352942,3406.4117647058824,433.7745082802328,67468.7817661952],
+  ["Commercial Hub","M","Sylhet",1219248.6666666667,3243.1111111111113,375.9503220501576,14704.106321562715],
+  ["Gated Community","H","Dhaka",8554645.5,13233.5,646.4386216798277,-75236.9918476291],
+  ["Gated Community","H","DhakaGBUD",40720005,33692,1208.5956606909651,2746969.340041858],
+  ["Gated Community","L","Dhaka",2068044,4460,463.68699551569506,68237.75110719487],
+  ["Gated Community","L","Khulna",884554,3362,263.10350981558594,67863.5669112033],
+  ["Gated Community","M","Dhaka",19828573.5,24044,824.6786516386625,584939.2158392939],
+  ["High Street","H","Dhaka",1762574,4361,404.1673927998166,-17408.75687877403],
+  ["High Street","L","Chattogram",927574.5,2164.5,428.53984753984753,-55579.577316935975],
+  ["High Street","L","Dhaka",998709.1111111111,2579.3333333333335,387.196605496683,24788.493660413118],
+  ["High Street","L","Khulna",580677,1573,369.15257469802924,-29824.277681775508],
+  ["High Street","L","Mymensingh",470393,1233,381.5028386050284,-30047.053828680422],
+  ["High Street","L","Rangpur",696766.5,1820,382.8387362637363,-46650.24337194754],
+  ["High Street","M","Barishal",790941.25,2419.5,326.9027691671833,-38125.46216276294],
+  ["High Street","M","Chattogram",856523,1817,471.3940561364887,17274.248631063674],
+  ["High Street","M","Dhaka",1309425.4545454546,3146.5454545454545,416.1470010401017,52266.98968266524],
+  ["High Street","M","Khulna",1062973.5714285714,2635.5714285714284,403.31806601983845,-4300.297415296115],
+  ["High Street","M","Mymensingh",829897,1944.5,426.7919773720751,-9871.926777520792],
+  ["High Street","M","Rajshahi",894370,2385,374.9979035639413,13598.17549183956],
+  ["High Street","M","Rangpur",880542.8,2418,364.16162117452444,19487.965603912242],
+  ["High Street","M","Sylhet",1203666.5,2955.5,407.26323803079003,31423.2798639292],
+  ["High Street W Institutions","H","Barishal",2421928,6737,359.49651180050466,116204.36814952362],
+  ["High Street W Institutions","H","Dhaka",7279102,12882,565.0599285825183,777179.2645156041],
+  ["High Street W Institutions","H","Khulna",5359746,9805,546.6339622641509,174270.54410812235],
+  ["High Street W Institutions","L","Barishal",1206186,3243.75,371.8492485549133,50169.69288189825],
+  ["High Street W Institutions","L","Chattogram",1310365.5,2932,446.918656207367,52037.083173775536],
+  ["High Street W Institutions","L","Dhaka",1344656.6666666667,3575.3333333333335,376.09267201193364,70871.09946117159],
+  ["High Street W Institutions","L","Mymensingh",1650204,2937,561.8672114402451,120778.6028013252],
+  ["High Street W Institutions","L","Rajshahi",1194429,3199.5,373.3173933427098,49452.865204380316],
+  ["High Street W Institutions","M","Barishal",1399515,3037,460.8215344089562,31308.014868472896],
+  ["High Street W Institutions","M","Dhaka",2853911.8,6337.2,450.3427065581013,171521.63348264544],
+  ["High Street W Institutions","M","Khulna",2385030,5403,441.4269850083287,135868.89904502052],
+  ["High Street W Institutions","M","Rajshahi",1713017,4382,390.9212688270196,87031.45754498593],
+  ["High Street W Institutions","M","Rangpur",1438581,3694.5,389.3844904587901,47919.631605405404],
+  ["High Street W Residential Block","H","Barishal",2382223.8,5088,468.20436320754715,108254.10462767424],
+  ["High Street W Residential Block","H","Chattogram",7079980.176470588,9446.058823529413,749.5168417578448,628322.4179279655],
+  ["High Street W Residential Block","H","Dhaka",7383048.360655738,10379.622950819672,711.3021730787151,590132.0124207502],
+  ["High Street W Residential Block","H","DhakaGBUD",25843934.2,23948.666666666668,1079.1387495476436,2464503.67453852],
+  ["High Street W Residential Block","H","Khulna",4246169.857142857,7275.571428571428,583.6201182037739,198316.09290350747],
+  ["High Street W Residential Block","H","Mymensingh",3767816,7260,518.9829201101928,236953.3583198465],
+  ["High Street W Residential Block","H","Rajshahi",3131916.75,4982,628.646477318346,164278.52319697101],
+  ["High Street W Residential Block","H","Rangpur",11189254.5,13464,831.0497994652407,689628.8321860823],
+  ["High Street W Residential Block","H","Sylhet",7088700.1,9237.4,767.3912681057441,551687.6792437853],
+  ["High Street W Residential Block","L","Barishal",947764.0666666667,2615.133333333333,362.4151987151707,15248.238204849795],
+  ["High Street W Residential Block","L","Chattogram",1210110.7692307692,2710.3076923076924,446.4846455128569,59804.66511954694],
+  ["High Street W Residential Block","L","Dhaka",1344285.0476190476,2921,460.21398412155,50478.8897929744],
+  ["High Street W Residential Block","L","Khulna",1063608.3333333333,2620,405.95737913486005,50477.637166559805],
+  ["High Street W Residential Block","L","Mymensingh",822515,2231,368.6754818467055,-15505.131961754552],
+  ["High Street W Residential Block","L","Rajshahi",1443903,3363.285714285714,429.31321411884636,54825.69652081281],
+  ["High Street W Residential Block","L","Rangpur",1131227.0833333333,2787.0833333333335,405.8820451487516,37321.70835215843],
+  ["High Street W Residential Block","L","Sylhet",1519857.25,3665,414.6950204638472,67514.26886278336],
+  ["High Street W Residential Block","M","Barishal",1194110.05,3186.95,374.68741273003974,29679.32779404478],
+  ["High Street W Residential Block","M","Chattogram",1936744.28125,4025.59375,481.10773255498026,115046.68006186208],
+  ["High Street W Residential Block","M","Dhaka",2877459.51754386,5403.833333333333,532.4848750967881,146681.16030403992],
+  ["High Street W Residential Block","M","DhakaGBUD",1561111,3806,410.1710457172885,32541.22912455842],
+  ["High Street W Residential Block","M","Khulna",1765883.5238095238,3838.5714285714284,460.0366455774718,94311.8888477782],
+  ["High Street W Residential Block","M","Mymensingh",1404443.5,3435.5,408.8032309707466,53653.08609692082],
+  ["High Street W Residential Block","M","Rajshahi",1789165.1818181819,3817,468.7359658942054,122451.61565035797],
+  ["High Street W Residential Block","M","Rangpur",1422138.4210526317,3546.5263157894738,400.9947465273656,50376.92321644047],
+  ["High Street W Residential Block","M","Sylhet",2010484.4583333333,4117.75,488.2483051018962,103505.25417353335],
+  ["Industrial","H","Chattogram",11313587,14444,783.2724314594295,1149666.5170246214],
+  ["Industrial","H","Dhaka",3541681,7955,445.2144563167819,308604.5000815202],
+  ["Industrial","H","Mymensingh",3048746,6451,472.60052705006973,111608.63444655726],
+  ["Industrial","L","Dhaka",2000287,3882.3333333333335,515.2280415557655,119734.92178106343],
+  ["Industrial","L","Sylhet",1703067,3124,545.1558898847632,92350.14595061989],
+  ["Industrial","M","Dhaka",2028151.6666666667,4416.333333333333,459.2388104762624,101908.01559273146],
+  ["Inside the Mall","H","Dhaka",7599044,11301,672.422263516503,897520.7511309914],
+  ["Inside the Mall","H","Mymensingh",5427417,10464,518.6751720183486,356245.0960102],
+  ["Inside the Mall","H","Rangpur",4688844,7072,663.0152714932127,282102.6901911871],
+  ["Inside the Mall","L","Khulna",1342148,3668,365.907306434024,90679.30813128862],
+  ["Inside the Mall","L","Rajshahi",1160626,1971,588.8513444951801,19844.928112671827],
+  ["Inside the Mall","M","Barishal",1077061,2785.5,386.6670256686412,32760.71595146606],
+  ["Inside the Mall","M","Dhaka",2063756,4714,437.7929571489181,113077.53596727249],
+  ["Inside the Mall","M","Rangpur",2495247,5037.5,495.33439205955335,204157.8516485553],
+  ["Within the Mahalla","H","Chattogram",1001878.6666666666,2494.6666666666665,401.6082308925708,10729.38640561481],
+  ["Within the Mahalla","H","Dhaka",2850894.447368421,5549.4473684210525,513.725828555712,132393.00803261442],
+  ["Within the Mahalla","H","DhakaGBUD",1608280,4260,377.53051643192487,-66070.97816834765],
+  ["Within the Mahalla","H","Mymensingh",1497162,5065,295.5897334649556,-6657.479511355154],
+  ["Within the Mahalla","H","Rajshahi",372966,929,401.470398277718,-50438.53217862311],
+  ["Within the Mahalla","L","Barishal",690815,2059,335.5099562894609,6131.6785155877005],
+  ["Within the Mahalla","L","Chattogram",1157919,2056,563.1901750972762,24908.75532669676],
+  ["Within the Mahalla","L","Dhaka",1323465.3,2919.95,453.2493022140791,48806.275845114826],
+  ["Within the Mahalla","L","Khulna",867594,2108,411.5721062618596,28006.11376124411],
+  ["Within the Mahalla","L","Mymensingh",712066,1917,371.44809598330727,-5210.810687398276],
+  ["Within the Mahalla","L","Rajshahi",955707.5,2604.5,366.9447110769822,27036.198983782815],
+  ["Within the Mahalla","L","Rangpur",943068,2212,426.34177215189874,14906.533307265112],
+  ["Within the Mahalla","M","Barishal",1045632,3425,305.2940145985402,10549.135227464052],
+  ["Within the Mahalla","M","Chattogram",1234851.7142857143,3302.714285714286,373.8899606384359,56493.133042871945],
+  ["Within the Mahalla","M","Dhaka",1852949.7738095238,4244.166666666667,436.58741970772206,63487.49470141468],
+  ["Within the Mahalla","M","Khulna",1442189.2,3266,441.5766074709124,56727.873773508414],
+  ["Within the Mahalla","M","Rajshahi",1297604,3267,397.18518518518516,30326.73980873922],
+  ["Within the Mahalla","M","Rangpur",1460791.5,3528.3333333333335,414.0174303259329,22961.876987966232],
+]);
+
+function builtInLocationDensityReference() {
+  return {
+    sheetName: null,
+    lastRow: 0,
+    builtIn: true,
+    rows: BUILT_IN_LOCATION_DENSITY_ROWS.map(([locationType, density, division, monthlySales, monthlyFootfall, basket, profit]) => ({
+      locationType, density, division, key: `${locationType}${density}${division}`,
+      monthlySales, monthlyFootfall, basket, profit,
+    })),
+  };
+}
+
 const DECORATION_COST_FLOOR = 1500000;
 const DECORATION_COST_PER_SFT = 1000;
 const DECORATION_COST_PNP_ADDITION = 2000000;
@@ -491,7 +626,7 @@ export const defaultData = {
     terminalRecovery: 3000000,
   },
   reference: {
-    locationDensityReference: { sheetName: null, lastRow: 0, rows: [] },
+    locationDensityReference: builtInLocationDensityReference(),
     gpLookup: {},
     basketLookup: {},
     writeOffLookup: {},
@@ -566,6 +701,18 @@ export const defaultData = {
 
 export function cloneData(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+// Restore baseline resets the inputs only; the lookup tables read from the
+// loaded Excel (Reference LocationType & Density, GP%/Basket/Write-off) stay.
+export function carryWorkbookLookupTables(target, source) {
+  const from = source?.reference;
+  if (!target?.reference || !from) return target;
+  if (from.locationDensityReference?.rows?.length) target.reference.locationDensityReference = cloneData(from.locationDensityReference);
+  ["gpLookup", "basketLookup", "writeOffLookup"].forEach((name) => {
+    if (from[name] && Object.keys(from[name]).length) target.reference[name] = cloneData(from[name]);
+  });
+  return target;
 }
 
 // Signatories 2 and 3 are linked to the selection panel by default. The
@@ -1420,7 +1567,10 @@ export function extractFromWorkbook(workbook, sourceName = "Imported workbook") 
   data.reference.gpLookup = lookup.gpLookup;
   data.reference.basketLookup = lookup.basketLookup;
   data.reference.writeOffLookup = lookup.writeOffLookup;
-  data.reference.locationDensityReference = extractLocationDensityReference(workbook);
+  const locationDensityReference = extractLocationDensityReference(workbook);
+  data.reference.locationDensityReference = locationDensityReference.rows.length
+    ? locationDensityReference
+    : builtInLocationDensityReference();
 
   const staffAddress = [
     ["om", 7], ["icmo", 8], ["duty", 9], ["cg", 12], ["commodity", 13], ["protein", 14], ["perishables", 15],
