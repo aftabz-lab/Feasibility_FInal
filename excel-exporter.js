@@ -1,5 +1,5 @@
 /* global ExcelJS */
-import { FR_COMMISSION_REFERENCE_ROWS, FR_COMMISSION_SHEET_NAME } from "./model.mjs?v=feasibility-forecast-reference-v33-20261012";
+import { FR_COMMISSION_REFERENCE_ROWS, FR_COMMISSION_SHEET_NAME, OPENED_BY_MASTER_LOOKUP_ADDITIONS, openedByOptions } from "./model.mjs?v=feasibility-opened-by-limon-v39-20261012";
 
 const COLORS = {
   navy: "17324D",
@@ -2516,10 +2516,19 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     C15: data?.project?.salesGivenBy ?? "",
     C16: data?.project?.openedBy ?? "",
   };
+  // Opened by -> Designation table is Master!E8:F15; added names go from E16.
+  let openedByLookupLastRow = 15;
+  OPENED_BY_MASTER_LOOKUP_ADDITIONS.forEach((name) => {
+    const designation = openedByOptions.find((item) => item.name === name)?.designation;
+    if (!designation) return;
+    openedByLookupLastRow += 1;
+    masterValues[`E${openedByLookupLastRow}`] = name;
+    masterValues[`F${openedByLookupLastRow}`] = designation;
+  });
   patchWorksheetValues(zip, paths.get("Master"), masterValues);
   patchWorksheetFormulas(zip, paths.get("Master"), {
     C17: dashboardFormulaSpec(
-      "VLOOKUP(C16,E8:F15,2,0)",
+      `VLOOKUP(C16,E8:F${openedByLookupLastRow},2,0)`,
       data?.project?.openedDesignation ?? "",
     ),
     C18: dashboardFormulaSpec(
