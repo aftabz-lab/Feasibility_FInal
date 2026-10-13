@@ -254,7 +254,7 @@ async function drawForecastPage(doc, data, model, assets, exportedAt, options = 
   const reference = model.forecastReference;
   const referenceMoney = (value, decimals = 0) => value === null || value === undefined ? "#N/A" : formatMoney(value, decimals);
   const pageWidth = doc.internal.pageSize.getWidth();
-  let y = drawPageHeader(doc, "SALES FORECASTING TOOLS", "Values-only feasibility output", sourceLabel(model, data), "Page 1 of 3 · Landscape", exportedAt);
+  let y = drawPageHeader(doc, "SALES FORECASTING TOOLS", "", sourceLabel(model, data), "Page 1 of 3 · Landscape", exportedAt);
   const margin = 26;
   const gap = 12;
   // Page 1 mirrors the complete source assessment: its full weighted score
@@ -361,7 +361,7 @@ async function drawForecastPage(doc, data, model, assets, exportedAt, options = 
 
 async function drawInformationPage(doc, data, model, assets, exportedAt, options = {}) {
   const pageWidth = doc.internal.pageSize.getWidth();
-  let y = drawPageHeader(doc, "BUSINESS FEASIBILITY INFORMATION", "Values-only feasibility output", sourceLabel(model, data), "Page 2 of 3 · Landscape", exportedAt);
+  let y = drawPageHeader(doc, "BUSINESS FEASIBILITY INFORMATION", "", sourceLabel(model, data), "Page 2 of 3 · Landscape", exportedAt);
   const margin = 26;
   const gap = 18;
   const leftWidth = 365;
@@ -630,7 +630,7 @@ async function drawFeasibilityPage(doc, data, model, assets, exportedAt, options
   const signatureMargin = 28;
   const signatureX = signatureMargin;
   const signatureWidth = pageWidth - (signatureMargin * 2);
-  let y = drawPageHeader(doc, "AUTO GENERATED FEASIBILITY", "Values-only model output with conditional checks", sourceLabel(model, data), "Page 3 of 3 · Portrait", exportedAt);
+  let y = drawPageHeader(doc, "AUTO GENERATED FEASIBILITY", "", sourceLabel(model, data), "Page 3 of 3 · Portrait", exportedAt);
   const table = drawFeasibilityTable(doc, y, data, model);
   y = table.y + 10;
   if (model.alerts?.franchisePbtAboveOutletPlYear1) {
@@ -709,3 +709,4 @@ export async function shareFeasibilityPdf(data, model, assets = []) {
   doc.save(fileName);
   return { method: "download", fileName, subject, body };
 }
+
