@@ -187,6 +187,21 @@ export function parseGoogleMapCoordinates(value) {
     return coordinate(pair[1], pair[2]);
   }
   if (placeIdFor(url) || url.searchParams.has("cid") || url.searchParams.has("ludocid")) return null;
+  // Street View coordinates identify the panorama position, including when
+  // Google retains a text search in the URL. A normal named map view still
+  // needs its place pin and must not use an offset map viewport.
+  if (!isDirections(url)) {
+    if (url.searchParams.get("map_action") === "pano") {
+      const viewpoint = coordinateText(url.searchParams.get("viewpoint"));
+      if (viewpoint) return viewpoint;
+    }
+    const panorama = decode(url.pathname).match(/\/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?),(?:2|3)a(?:[,/]|$)/i);
+    if (panorama) return coordinate(panorama[1], panorama[2]);
+    if (url.searchParams.get("layer") === "c") {
+      const viewpoint = coordinateText(url.searchParams.get("cbll"));
+      if (viewpoint) return viewpoint;
+    }
+  }
   const query = queryFor(url);
   if (query) return coordinateText(query.replace(/(\d\s*,\s*)\+(?=\d)/g, "$1"));
   if (isDirections(url)) return null;

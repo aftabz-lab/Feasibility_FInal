@@ -3,7 +3,7 @@ import {
   googleMapPlaceDetailsUrl,
   normalizeGoogleMapsUrl,
   parseGoogleMapCoordinates,
-} from "./google-map-input.js?v=feasibility-google-links-v29";
+} from "./google-map-input.js?v=feasibility-street-view-v42-20261014";
 
 const resolverCache = new Map();
 const assessmentCache = new Map();
@@ -90,14 +90,14 @@ async function resolveWithPlaceDetailsFallback(value, endpoint) {
   try {
     return await resolveWithBrowserFallback(value, endpoint);
   } catch (error) {
-    // Older resolver deployments may expose the expanded URL on a parsing
-    // error. Read its pin/coordinate search locally before requesting details.
-    if (!error?.resolverResponded
-      || !/(?:did not contain|did not provide|could not.*(?:location|coordinate)|usable coordinates|no coordinates)/i.test(error.message || "")) {
-      throw error;
-    }
+    // The resolver may return the expanded public URL with a parsing or
+    // sign-in warning. Use its explicit pin/Street View coordinates first.
+    if (!error?.resolverResponded) throw error;
     const direct = parseGoogleMapCoordinates(error.resolvedUrl);
     if (direct) return { ...direct, label: error.resolvedUrl, provider: "Google Maps link" };
+    if (!/(?:did not contain|did not provide|could not.*(?:location|coordinate)|usable coordinates|no coordinates)/i.test(error.message || "")) {
+      throw error;
+    }
     const detailsUrl = googleMapPlaceDetailsUrl(error.resolvedUrl || value);
     if (!detailsUrl || detailsUrl === value) throw error;
     const resolved = await resolveWithBrowserFallback(detailsUrl, endpoint);
