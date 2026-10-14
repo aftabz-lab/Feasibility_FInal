@@ -15,7 +15,7 @@ import {
   lookupFranchiseCommissionRate,
   openedByOptions,
   salesGivenByOptions,
-} from "./model.mjs?v=feasibility-opened-by-limon-v39-20261012";
+} from "./model.mjs?v=feasibility-opened-by-ferdous-v41-20261014";
 import {
   assessLocationEnvironment,
   geocodeLocationArea,
@@ -24,7 +24,7 @@ import {
   outletsWithinRadius,
 } from "./geo-outlets.js?v=feasibility-assessment-get-v30";
 import { assessGoogleMapLocation, resolveGoogleMapsLink } from "./map-link-resolver.js?v=feasibility-assessment-get-v30";
-import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-opened-by-limon-v39-20261012";
+import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-opened-by-ferdous-v41-20261014";
 import { BASELINE_DATA } from "./data/baseline-data.js?v=feasibility-no-source-xlsx-v38-20261012";
 import { downloadFeasibilityPdf, downloadManagementFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-pdf-label-v40-20261013";
 import { readCatchmentWorkbook } from "./catchment-pdf.js?v=feasibility-commission-catchment-v31";

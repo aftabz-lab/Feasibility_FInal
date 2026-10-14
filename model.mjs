@@ -23,12 +23,13 @@ export const openedByOptions = [
   { name: "Ms. Qarin", designation: "Regional Head" },
   { name: "Mr. Ranjan", designation: "Regional Head" },
   { name: "Mr. Mehedi Hasan Limon", designation: "Head Of Franchisee Relations" },
+  { name: "Ferdous Zaman", designation: "Manager Franchise Expansion" },
 ];
 
 // Opened by names added after the workbook's Master!E8:F15 lookup table was
 // made. The Excel with Rules writes them below that table (from Master!E16)
 // so Master!C17 =VLOOKUP(C16,...) also returns their designation in Excel.
-export const OPENED_BY_MASTER_LOOKUP_ADDITIONS = Object.freeze(["Mr. Mehedi Hasan Limon"]);
+export const OPENED_BY_MASTER_LOOKUP_ADDITIONS = Object.freeze(["Mr. Mehedi Hasan Limon", "Ferdous Zaman"]);
 
 export const salesGivenByOptions = [
   "Mr. Mamun",
