@@ -2647,10 +2647,23 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
     [21, "security"], [22, "cleaner"],
   ];
   const staffFormulaCaches = {};
+  const manpowerFormulas = {};
+
+  // Match the dashboard's inclusive upper sales bands: Non-P&P starts at
+  // 15 Lac (C:O), P&P at 27 Lac (G:AE), then both advance every 3 Lac.
+  // Clamp to the populated matrix ends, including P&P sales below 27 Lac.
+  const nonPnpColumn = "MIN(13,MAX(1,ROUNDUP($B$9/300000,0)-4))";
+  const pnpColumn = "MIN(25,MAX(1,ROUNDUP($B$9/300000,0)-8))";
 
   manpowerRows.forEach(([row, id]) => {
     const qty = Number(staffById(data, id).quantity || 0);
     if (manpowerAuto) {
+      manpowerFormulas[`E${row}`] = dashboardFormulaSpec(
+        // With no positive sales, retain the current allocation just as
+        // applyAutoManpower does in the dashboard.
+        `IF($B$9>0,IF(UPPER(TRIM($B$14))="Y",INDEX(MANPOWER!$G$25:$AE$38,MATCH(D${row},MANPOWER!$B$25:$B$38,0),${pnpColumn}),INDEX(MANPOWER!$C$4:$O$17,MATCH(D${row},MANPOWER!$B$4:$B$17,0),${nonPnpColumn})),${qty})`,
+        qty,
+      );
       staffFormulaCaches[`E${row}`] = qty;
     } else {
       informationValues[`E${row}`] = qty;
@@ -2660,8 +2673,10 @@ export function buildRulesWorkbookBuffer(templateBuffer, data, model, exportedAt
   staffFormulaCaches.E23 = (data?.staff || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0);
   staffFormulaCaches.G23 = (data?.staff || []).reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.salary || 0), 0);
 
-  // When manual headcount is active, overwrite the quantity formula cells with dashboard values.
-  if (!manpowerAuto) {
+  if (manpowerAuto) {
+    patchWorksheetFormulas(zip, paths.get("INFORMATION"), manpowerFormulas);
+  } else {
+    // Manual headcount remains the exact quantity entered on the dashboard.
     const manualQuantities = {};
     manpowerRows.forEach(([row, id]) => { manualQuantities[`E${row}`] = Number(staffById(data, id).quantity || 0); });
     patchWorksheetValues(zip, paths.get("INFORMATION"), manualQuantities);

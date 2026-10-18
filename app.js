@@ -24,7 +24,7 @@ import {
   outletsWithinRadius,
 } from "./geo-outlets.js?v=feasibility-assessment-get-v30";
 import { assessGoogleMapLocation, resolveGoogleMapsLink } from "./map-link-resolver.js?v=feasibility-street-view-v42-20261014";
-import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-opened-by-ferdous-v41-20261014";
+import { downloadRulesWorkbook, downloadValuesOnlyWorkbook } from "./excel-exporter.js?v=feasibility-manpower-export-v43-20261018";
 import { BASELINE_DATA } from "./data/baseline-data.js?v=feasibility-no-source-xlsx-v38-20261012";
 import { downloadFeasibilityPdf, downloadManagementFeasibilityPdf, shareFeasibilityPdf, mailtoLink, whatsappLink } from "./pdf-exporter.js?v=feasibility-pdf-label-v40-20261013";
 import { readCatchmentWorkbook } from "./catchment-pdf.js?v=feasibility-commission-catchment-v31";
@@ -51,16 +51,28 @@ const state = {
 
 let locationLookupToken = 0;
 
-const blankInitialSelectionPaths = Object.freeze([
+const blankLocationSetupPaths = Object.freeze([
   "project.locationArea",
   "project.googleMapLocation",
   "project.district",
   "project.division",
   "project.pnp",
   "project.frOwn",
+  "project.sft",
   "project.density",
   "project.incomeLevel",
   "project.locationType",
+  "project.longFeet",
+  "project.projectedDailySales",
+  "project.monthlySalesOverride",
+  "project.monthlyRent",
+  "project.advance",
+  "project.outboundTransport",
+  "project.existingOutlets",
+]);
+
+const blankInitialSelectionPaths = Object.freeze([
+  ...blankLocationSetupPaths,
   "project.salesGivenBy",
   "project.openedBy",
   "forecast.roadStatus",
@@ -675,7 +687,7 @@ function renderDataEntry() {
           ${textField("Enter Location Area", "project.locationArea")}
           ${districtSelectField()}
           ${selectField("Division", "project.division", ["Dhaka", "DhakaGBUD", "Chattogram", "Sylhet", "Mymensingh", "Rajshahi", "Rangpur", "Barishal", "Khulna"], { hint: "Set automatically from District" })}
-          ${automaticField("Area Out of Dhaka (Y/N)", `${model.dhakaClassification} (${model.inputs.areaOutsideDhaka})`, "Automatic from Division")}
+          ${automaticField("Area Out of Dhaka (Y/N)", data.project.division ? `${model.dhakaClassification} (${model.inputs.areaOutsideDhaka})` : "", "Automatic from Division")}
           ${selectField("P&P (Y or N)", "project.pnp", ["Y", "N"])}
           ${selectField("FR / OWN", "project.frOwn", ["FR", "OWN"])}
           ${textField("SFT", "project.sft", { type: "number", min: 0, step: 1 })}
@@ -1470,6 +1482,7 @@ app.addEventListener("click", (event) => {
   }
   if (actionName === "reset") {
     state.data = carryWorkbookLookupTables(cloneData(defaultData), state.data);
+    blankLocationSetupPaths.forEach((path) => setPath(state.data, path, ""));
     state.firstFeasibilityEntry = null;
     locationLookupMessage("waiting", "Enter Google Map Location and select District to calculate the 1 KM count.");
     locationAssessmentMessage("waiting", "Enter Google Map Location and select District for automatic assessment.");
@@ -1537,6 +1550,8 @@ catchmentInput.addEventListener("change", () => {
 });
 
 async function initialise() {
+  blankLocationSetupPaths.forEach((path) => setPath(state.data, path, ""));
+  recalculate();
   installRuntimeStyles();
   render();
   await Promise.all([loadSignManifest(), loadConfiguredSource(), loadZoneOutletMap()]);
