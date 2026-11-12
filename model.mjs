@@ -197,24 +197,26 @@ export function getOutboundTransportDefault({ district } = {}) {
   return normalizedDistrict === "dhaka" || normalizedDistrict === "dhakagbud" ? 10000 : 20000;
 }
 
+// Source workbook, Sales forecasting tools: category name and the two
+// contribution rates (U = P&P, V = Non-P&P) used by each daily-sales formula.
 const defaultCategories = [
-  ["Baby Care", 652.2405342812247],
-  ["Baby Food", 567.1610263469142],
-  ["Beverage & Tobacco", 2556.1132696520867],
-  ["Dairy", 3445.62111698506],
-  ["Home Care", 3884.5304669720867],
-  ["Kitchen Additives", 2546.560448141654],
-  ["Packaged Foods", 12458.691088936097],
-  ["Personal Care", 6733.40949421121],
-  ["Commodities", 13169.054983136819],
-  ["Electronics & Appl", 500.37607245914296],
-  ["Gift & Toys", 408.79899927823254],
-  ["Home Accessories", 856.3365883515366],
-  ["Home Appliance", 330.90689997357606],
-  ["Stationeries", 184.15169457143932],
-  ["Life Style", 57.052038343643],
-  ["Perishables", 119.41544454687899],
-  ["Protein", 1529.579833812395],
+  ["Baby Care", 0.010017679864233197, 0.013472604431973213],
+  ["Baby Food", 0.006706954769397947, 0.011715212035425734],
+  ["Beverage & Tobacco", 0.043399172496557024, 0.05279877768297658],
+  ["Dairy", 0.06733366861695698, 0.07117234807056318],
+  ["Home Care", 0.062005805842293454, 0.08023840843184717],
+  ["Kitchen Additives", 0.04406296670208488, 0.05260145571561199],
+  ["Packaged Foods", 0.20682700779068153, 0.2573452705854276],
+  ["Personal Care", 0.11367339719027124, 0.13908452147024408],
+  ["Commodities", 0.1947316266338011, 0.2720184643633475],
+  ["Electronics & Appl", 0.010381743074448455, 0.010335709814317893],
+  ["Gift & Toys", 0.006075175788416708, 0.008444104467581953],
+  ["Home Accessories", 0.01754624518885557, 0.01768838872947342],
+  ["Home Appliance", 0.0040243755180892305, 0.00683517434571507],
+  ["Stationeries", 0.0033583000335905217, 0.0038038159329865017],
+  ["Life Style", 0.003265444122414247, 0.0011784602523802333],
+  ["Perishables", 0.03882448122526405, 0],
+  ["Protein", 0.16776595514264359, 0.0012672836701278188],
 ];
 
 function categoryMix(items) {
@@ -645,7 +647,7 @@ export const defaultData = {
     referenceBasket: 644.6942189015655,
     referenceProfit: 296636.58004284103,
     autoBasketSize: 426.75836724362256,
-    categories: categoryMix(defaultCategories),
+    categories: defaultCategories.map(([name, pnpMix, mix]) => ({ name, mix, pnpMix })),
   },
   signatories: [
     {
@@ -1274,12 +1276,13 @@ export function calculateModel(data) {
     line("Total Profit", totalProfit, { emphasis: true, separatorBefore: true }),
   ];
 
-  const categories = data.reference.categories.map((category) => ({
-    name: category.name,
-    perDaySales: number(category.mix) * dailySales,
-    monthlySales: number(category.mix) * monthlySales,
-    mix: category.mix,
-  }));
+  const usePnpMix = yes(project.pnp);
+  const categories = data.reference.categories.map((category) => {
+    const ruleMix = usePnpMix ? (category.pnpMix ?? category.mix) : category.mix;
+    const mix = number(category.mixOverride ?? ruleMix);
+    const perDaySales = mix * dailySales;
+    return { name: category.name, mix, perDaySales, monthlySales: perDaySales * 30 };
+  });
   const signatories = data.signatories.map((signatory) => {
     const autoLink = getSignatoryAutoLink(signatory);
     if (!autoLink || signatory.manualOverride === true) return { ...signatory };
@@ -1591,12 +1594,30 @@ export function extractFromWorkbook(workbook, sourceName = "Imported workbook") 
   });
 
   const categories = [];
+  const forecastCells = workbook.Sheets[forecastSheet];
+  const pnpCell = editedLayout ? "C20" : "C22";
+  // Read both shares from the source formula rather than locking the mix to
+  // the cached result for whichever P&P choice the workbook was saved with.
+  const categoryFormula = new RegExp(String.raw`^=?\(?IF\(${pnpCell}="Y",([A-Z]+\d+),([A-Z]+\d+)\)\)?\*H\d+$`);
   for (let row = editedLayout ? 19 : 21; row <= (editedLayout ? 36 : 80); row += 1) {
     const name = get(forecastSheet, `E${row}`);
-    const value = optionalNumber(get(forecastSheet, `H${row}`));
-    if (typeof name === "string" && name.trim() && value !== null && value >= 0) categories.push([name.trim(), value]);
+    if (typeof name !== "string" || !name.trim()) continue;
+    const dailyCell = forecastCells[`H${row}`];
+    const value = optionalNumber(dailyCell?.v);
+    const rates = String(dailyCell?.f ?? "").replace(/[$\s]/g, "").toUpperCase().match(categoryFormula);
+    const pnpMix = rates ? optionalNumber(get(forecastSheet, rates[1])) : null;
+    const mix = rates ? optionalNumber(get(forecastSheet, rates[2])) : null;
+    const hasRule = pnpMix !== null && pnpMix >= 0 && mix !== null && mix >= 0;
+    if (hasRule || (value !== null && value >= 0)) {
+      categories.push({ name: name.trim(), value: value ?? 0, mix, pnpMix, hasRule });
+    }
   }
-  if (categories.length) data.reference.categories = categoryMix(categories);
+  if (categories.length) {
+    const cachedMix = categoryMix(categories.map(({ name, value }) => [name, value]));
+    data.reference.categories = categories.map(({ name, mix, pnpMix, hasRule }, index) => (
+      hasRule ? { name, mix, pnpMix } : cachedMix[index]
+    ));
+  }
   return data;
 }
 

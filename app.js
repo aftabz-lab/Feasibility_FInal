@@ -15,7 +15,7 @@ import {
   lookupFranchiseCommissionRate,
   openedByOptions,
   salesGivenByOptions,
-} from "./model.mjs?v=feasibility-opened-by-ferdous-v41-20261014";
+} from "./model.mjs?v=feasibility-category-mix-v44-20261112";
 import {
   assessLocationEnvironment,
   geocodeLocationArea,
@@ -38,6 +38,7 @@ const state = {
   view: "entry",
   data: cloneData(defaultData),
   model: calculateModel(defaultData),
+  baselineCategories: cloneData(defaultData.reference.categories),
   signatureAssets: [],
   rulesWorkbook: { buffer: null, sourceName: "source-workbook.xlsx" },
   catchment: null,
@@ -633,7 +634,7 @@ function renderDataEntry() {
     ? Number(data.project.monthlySalesOverride)
     : Number(data.project.projectedDailySales) * 30;
   const staffRows = data.staff.map((staff, index) => `<tr><td>${escapeHtml(staff.name)}</td><td><input data-path="staff.${index}.quantity" type="number" min="0" step="1" value="${escapeHtml(valueForInput(staff.quantity))}"></td><td><input data-path="staff.${index}.salary" type="number" min="0" step="1" value="${escapeHtml(valueForInput(staff.salary))}"></td><td>৳ ${formatMoney(Number(staff.quantity) * Number(staff.salary))}</td></tr>`).join("");
-  const categoryRows = data.reference.categories.map((category, index) => `<tr><td><input data-path="reference.categories.${index}.name" type="text" value="${escapeHtml(valueForInput(category.name))}"></td><td><input data-path="reference.categories.${index}.mix" type="number" min="0" max="1" step="0.0001" value="${escapeHtml(valueForInput(category.mix))}"></td><td>${formatPercent(category.mix, 1)}</td></tr>`).join("");
+  const categoryRows = model.categories.map((category, index) => `<tr><td><input data-path="reference.categories.${index}.name" type="text" value="${escapeHtml(valueForInput(category.name))}"></td><td><input data-path="reference.categories.${index}.mixOverride" type="number" min="0" max="1" step="0.0001" value="${escapeHtml(valueForInput(category.mix))}"></td><td>${formatPercent(category.mix, 1)}</td></tr>`).join("");
   const signatory2 = model.signatories.find((person) => (
     getSignatoryAutoLink(person)?.source === "sales-given-by"
   ));
@@ -1242,6 +1243,7 @@ function applyLoadedData(importedData, buffer, sourceName) {
     state.rulesWorkbook = { buffer: buffer.slice(0), sourceName };
   }
   state.data = importedData;
+  state.baselineCategories = cloneData(importedData.reference.categories);
   state.locationAssessment = { kind: "waiting", message: "Enter Google Map Location and select District for automatic assessment." };
   state.locationLookup = { kind: "waiting", message: "Enter Google Map Location and select District to calculate the 1 KM count." };
   state.firstFeasibilityEntry = null;
@@ -1254,6 +1256,7 @@ async function loadConfiguredSource() {
     // data/source-workbook.xlsx is stored in data/baseline-data.js, and the
     // Excel with Rules template in data/rules-template.js (loaded on download).
     const baselineData = cloneData(BASELINE_DATA);
+    baselineData.reference.categories = cloneData(defaultData.reference.categories);
     baselineData.meta = { ...baselineData.meta, loadedAt: new Date().toISOString() };
     applyLoadedData(baselineData, null, baselineData.meta.sourceName);
     clearInitialSelections(state.data);
@@ -1482,6 +1485,7 @@ app.addEventListener("click", (event) => {
   }
   if (actionName === "reset") {
     state.data = carryWorkbookLookupTables(cloneData(defaultData), state.data);
+    state.data.reference.categories = cloneData(state.baselineCategories);
     blankLocationSetupPaths.forEach((path) => setPath(state.data, path, ""));
     state.firstFeasibilityEntry = null;
     locationLookupMessage("waiting", "Enter Google Map Location and select District to calculate the 1 KM count.");
